@@ -52,9 +52,14 @@ def step_agent(agent: Agent, world: World) -> list[Particle]:
 def _do_sense(agent: Agent) -> None:
     """SENSE phase: Read input_buffer into internal_state, clear buffer.
 
+    Only executes on the first tick of the phase (phase_tick == 0) to prevent
+    overwriting sensed_inputs with an empty buffer on subsequent ticks.
+
     Genome traits like 'observation' and 'signal_discrimination' could filter
     or weight the sensed inputs (not implemented in base version).
     """
+    if agent.phase_tick != 0:
+        return  # Only sense at start of phase
     # Store sensed inputs in internal state
     agent.internal_state["sensed_inputs"] = list(agent.input_buffer)
     # Clear the input buffer
@@ -64,9 +69,13 @@ def _do_sense(agent: Agent) -> None:
 def _do_orient(agent: Agent) -> None:
     """ORIENT phase: Interpret sensed_inputs through genome biases.
 
+    Only executes on the first tick of the phase (phase_tick == 0).
+
     Risk-tolerant agents might interpret ambiguous signals as opportunities.
     Update internal_state with oriented interpretation.
     """
+    if agent.phase_tick != 0:
+        return  # Only orient at start of phase
     # Base implementation: just pass through sensed inputs as oriented_inputs
     # Genome biases would modify interpretation here in advanced implementations
     sensed = agent.internal_state.get("sensed_inputs", [])
@@ -76,9 +85,14 @@ def _do_orient(agent: Agent) -> None:
 def _do_decide(agent: Agent) -> None:
     """DECIDE phase: Run policy to produce planned_actions.
 
+    Only executes on the first tick of the phase (phase_tick == 0) to prevent
+    running the policy multiple times per cycle.
+
     Invokes agent.policy(sensed_inputs, genome, internal_state) → planned_actions.
     Stores planned_actions in internal_state.
     """
+    if agent.phase_tick != 0:
+        return  # Only decide at start of phase
     if agent.policy is None:
         agent.internal_state["planned_actions"] = []
         return
@@ -91,8 +105,13 @@ def _do_decide(agent: Agent) -> None:
 def _do_act(agent: Agent, world: World) -> list[Particle]:
     """ACT phase: Convert planned_actions into Particles.
 
+    Only executes on the first tick of the phase (phase_tick == 0) to prevent
+    emitting duplicate particles on subsequent ticks.
+
     Places particles on appropriate outgoing links. Returns newly created particles.
     """
+    if agent.phase_tick != 0:
+        return []  # Only act at start of phase
     planned_actions = agent.internal_state.get("planned_actions", [])
 
     # The planned_actions should already be Particle objects from the policy
