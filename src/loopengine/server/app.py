@@ -22,6 +22,7 @@ from enum import Enum, StrEnum
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
@@ -744,6 +745,15 @@ app = FastAPI(
     description="Simulation framework and visual explorer for modeling agents",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+# Configure CORS for frontend access
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8080", "http://127.0.0.1:8080"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Include routers

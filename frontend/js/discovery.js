@@ -15,6 +15,7 @@
     const PANEL_WIDTH = 320;
     const PANEL_PADDING = 16;
     const POLL_INTERVAL_MS = 1000;
+    const API_BASE_URL = 'http://localhost:8000';
 
     // Colors
     const PANEL_BG_COLOR = 'rgba(26, 26, 46, 0.95)';
@@ -115,7 +116,7 @@
      */
     async function fetchSchemas() {
         try {
-            const response = await fetch('/api/schemas');
+            const response = await fetch(`${API_BASE_URL}/api/schemas`);
             if (response.ok) {
                 const schemas = await response.json();
                 // Convert array to role -> schema map
@@ -148,7 +149,7 @@
             // Get system description from world state
             const systemDescription = await getSystemDescription();
 
-            const response = await fetch('/api/discovery/run', {
+            const response = await fetch(`${API_BASE_URL}/api/discovery/run`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(systemDescription)
@@ -177,7 +178,7 @@
     async function getSystemDescription() {
         // Fetch agents to determine roles
         try {
-            const response = await fetch('/api/agents');
+            const response = await fetch(`${API_BASE_URL}/api/agents`);
             if (response.ok) {
                 const agents = await response.json();
                 const roles = {};
@@ -251,7 +252,7 @@
         if (!currentJobId) return;
 
         try {
-            const response = await fetch(`/api/discovery/status/${currentJobId}`);
+            const response = await fetch(`${API_BASE_URL}/api/discovery/status/${currentJobId}`);
             if (response.ok) {
                 const data = await response.json();
 
