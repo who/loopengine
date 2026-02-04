@@ -1,8 +1,8 @@
 /**
  * LoopEngine Interaction Module
  *
- * Handles mouse hover detection, tooltips, and link highlighting for agents.
- * Provides hover tooltips showing agent details including genome traits bar chart.
+ * Handles mouse hover detection, tooltips, click selection, and link highlighting.
+ * Provides hover tooltips and a slide-in detail panel for selected agents.
  */
 
 (function(global) {
@@ -13,6 +13,7 @@
     // =========================================================================
 
     let hoveredAgent = null;
+    let selectedAgent = null;
     let mouseX = 0;
     let mouseY = 0;
     let canvas = null;
@@ -21,6 +22,20 @@
     // Hover highlight configuration
     const HOVER_GLOW_INCREASE = 0.5;  // Added glow when hovering
     const HOVER_RADIUS_SCALE = 1.15;  // Scale factor for hovered agent
+
+    // Selection configuration
+    const SELECTION_GLOW_INCREASE = 0.7;  // Added glow when selected
+    const SELECTION_RING_WIDTH = 3;       // Selection ring stroke width
+    const SELECTION_RING_COLOR = 'rgba(255, 255, 255, 0.9)';
+    const SELECTION_RING_PULSE_SPEED = 2.0;  // Pulse frequency
+
+    // Detail panel configuration
+    const PANEL_WIDTH = 280;
+    const PANEL_SLIDE_SPEED = 0.15;  // Animation speed (0-1 per frame)
+    let panelSlideProgress = 0;      // 0 = hidden, 1 = fully visible
+
+    // Pan animation for centering on selection
+    let panAnimation = null;  // {startX, startY, targetX, targetY, progress}
 
     // =========================================================================
     // Initialization
@@ -35,6 +50,7 @@
 
         canvas.addEventListener('mousemove', handleMouseMove);
         canvas.addEventListener('mouseleave', handleMouseLeave);
+        canvas.addEventListener('click', handleClick);
     }
 
     /**
@@ -67,6 +83,120 @@
      */
     function handleMouseLeave() {
         hoveredAgent = null;
+    }
+
+    /**
+     * Handle click events for agent selection.
+     * @param {MouseEvent} event - Mouse event
+     */
+    function handleClick(event) {
+        const rect = canvas.getBoundingClientRect();
+        const clickX = event.clientX - rect.left;
+        const clickY = event.clientY - rect.top;
+
+        // Perform hit test against agents
+        const clickedAgent = hitTestAgents(clickX, clickY);
+
+        if (clickedAgent) {
+            // Select the clicked agent
+            selectAgent(clickedAgent);
+        } else {
+            // Click on empty space - deselect
+            deselectAgent();
+        }
+    }
+
+    /**
+     * Select an agent and initiate pan animation to center it.
+     * @param {Object} agent - Agent to select
+     */
+    function selectAgent(agent) {
+        selectedAgent = agent;
+        panelSlideProgress = 0;  // Start panel slide animation
+
+        // Initiate pan animation to center the agent
+        const viewport = typeof LoopEngineRenderer !== 'undefined'
+            ? LoopEngineRenderer.getViewport()
+            : { scale: 1, offsetX: 0, offsetY: 0 };
+
+        const canvasWidth = canvas._logicalWidth || canvas.width;
+        const canvasHeight = canvas._logicalHeight || canvas.height;
+
+        // Target offset to center the agent (accounting for detail panel)
+        const panelOffset = PANEL_WIDTH / 2;  // Shift center left to account for panel
+        const targetOffsetX = (canvasWidth / 2 - panelOffset) - agent.x * viewport.scale;
+        const targetOffsetY = canvasHeight / 2 - agent.y * viewport.scale;
+
+        panAnimation = {
+            startX: viewport.offsetX,
+            startY: viewport.offsetY,
+            targetX: targetOffsetX,
+            targetY: targetOffsetY,
+            progress: 0
+        };
+    }
+
+    /**
+     * Deselect the currently selected agent.
+     */
+    function deselectAgent() {
+        selectedAgent = null;
+        panAnimation = null;
+    }
+
+    /**
+     * Update animations (called each frame).
+     * @param {number} deltaTime - Time since last frame in seconds
+     */
+    function updateAnimations(deltaTime) {
+        // Update panel slide animation
+        if (selectedAgent && panelSlideProgress < 1) {
+            panelSlideProgress = Math.min(1, panelSlideProgress + PANEL_SLIDE_SPEED);
+        } else if (!selectedAgent && panelSlideProgress > 0) {
+            panelSlideProgress = Math.max(0, panelSlideProgress - PANEL_SLIDE_SPEED);
+        }
+
+        // Update pan animation
+        if (panAnimation && panAnimation.progress < 1) {
+            panAnimation.progress = Math.min(1, panAnimation.progress + 0.05);
+
+            // Ease-out interpolation
+            const t = easeOutCubic(panAnimation.progress);
+            const newOffsetX = lerp(panAnimation.startX, panAnimation.targetX, t);
+            const newOffsetY = lerp(panAnimation.startY, panAnimation.targetY, t);
+
+            if (typeof LoopEngineRenderer !== 'undefined') {
+                LoopEngineRenderer.setViewport({
+                    offsetX: newOffsetX,
+                    offsetY: newOffsetY
+                });
+            }
+
+            // Clear animation when complete
+            if (panAnimation.progress >= 1) {
+                panAnimation = null;
+            }
+        }
+    }
+
+    /**
+     * Ease-out cubic function for smooth animation.
+     * @param {number} t - Input (0-1)
+     * @returns {number} Eased value (0-1)
+     */
+    function easeOutCubic(t) {
+        return 1 - Math.pow(1 - t, 3);
+    }
+
+    /**
+     * Linear interpolation.
+     * @param {number} a - Start value
+     * @param {number} b - End value
+     * @param {number} t - Interpolation factor (0-1)
+     * @returns {number} Interpolated value
+     */
+    function lerp(a, b, t) {
+        return a + (b - a) * t;
     }
 
     // =========================================================================
@@ -302,23 +432,76 @@
     }
 
     // =========================================================================
-    // Hover Highlight Effects
+    // Hover and Selection Highlight Effects
     // =========================================================================
 
     /**
-     * Get hover state for an agent (glow and scale adjustments).
+     * Get hover/selection state for an agent (glow and scale adjustments).
      * @param {Object} agent - Agent to check
-     * @returns {Object} Hover state {glowBoost, scaleBoost, isHovered}
+     * @returns {Object} State {glowBoost, scaleBoost, isHovered, isSelected}
      */
     function getAgentHoverState(agent) {
-        if (!hoveredAgent || agent.id !== hoveredAgent.id) {
-            return { glowBoost: 0, scaleBoost: 1.0, isHovered: false };
+        const isHovered = hoveredAgent && agent.id === hoveredAgent.id;
+        const isSelected = selectedAgent && agent.id === selectedAgent.id;
+
+        if (!isHovered && !isSelected) {
+            return { glowBoost: 0, scaleBoost: 1.0, isHovered: false, isSelected: false };
         }
+
+        // Selection takes priority for glow, but hover adds to it
+        let glowBoost = 0;
+        let scaleBoost = 1.0;
+
+        if (isSelected) {
+            glowBoost += SELECTION_GLOW_INCREASE;
+        }
+        if (isHovered) {
+            glowBoost += HOVER_GLOW_INCREASE;
+            scaleBoost = HOVER_RADIUS_SCALE;
+        }
+
         return {
-            glowBoost: HOVER_GLOW_INCREASE,
-            scaleBoost: HOVER_RADIUS_SCALE,
-            isHovered: true
+            glowBoost: Math.min(1.0, glowBoost),
+            scaleBoost: scaleBoost,
+            isHovered: isHovered,
+            isSelected: isSelected
         };
+    }
+
+    /**
+     * Render selection ring around selected agent.
+     * @param {CanvasRenderingContext2D} ctx - Canvas context
+     * @param {number} animationTime - Current animation time
+     */
+    function renderSelectionRing(ctx, animationTime) {
+        if (!selectedAgent) return;
+
+        const viewport = typeof LoopEngineRenderer !== 'undefined'
+            ? LoopEngineRenderer.getViewport()
+            : { scale: 1, offsetX: 0, offsetY: 0 };
+
+        const screenX = selectedAgent.x * viewport.scale + viewport.offsetX;
+        const screenY = selectedAgent.y * viewport.scale + viewport.offsetY;
+        const baseRadius = (selectedAgent.radius || 20) * viewport.scale;
+
+        // Pulsing ring radius
+        const pulsePhase = animationTime * SELECTION_RING_PULSE_SPEED;
+        const pulseAmount = 1 + 0.08 * Math.sin(pulsePhase * Math.PI * 2);
+        const ringRadius = baseRadius * 1.3 * pulseAmount;
+
+        ctx.save();
+
+        // Draw selection ring
+        ctx.strokeStyle = SELECTION_RING_COLOR;
+        ctx.lineWidth = SELECTION_RING_WIDTH;
+        ctx.setLineDash([8, 4]);  // Dashed line for selection
+        ctx.lineDashOffset = -animationTime * 30;  // Animated dash
+
+        ctx.beginPath();
+        ctx.arc(screenX, screenY, ringRadius, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.restore();
     }
 
     /**
@@ -339,6 +522,227 @@
         return hoveredAgent;
     }
 
+    /**
+     * Get the currently selected agent.
+     * @returns {Object|null} The selected agent or null
+     */
+    function getSelectedAgent() {
+        return selectedAgent;
+    }
+
+    // =========================================================================
+    // Detail Panel Rendering
+    // =========================================================================
+
+    /**
+     * Render the slide-in detail panel for the selected agent.
+     * @param {CanvasRenderingContext2D} ctx - Canvas context
+     * @param {number} animationTime - Current animation time
+     */
+    function renderDetailPanel(ctx, animationTime) {
+        // Update animations
+        updateAnimations(0.016);  // Assume ~60fps
+
+        // Don't render if panel is fully hidden
+        if (panelSlideProgress <= 0 && !selectedAgent) return;
+
+        const canvasWidth = ctx.canvas._logicalWidth || ctx.canvas.width;
+        const canvasHeight = ctx.canvas._logicalHeight || ctx.canvas.height;
+
+        // Calculate panel position with slide animation (ease-out)
+        const slideEase = easeOutCubic(panelSlideProgress);
+        const panelX = canvasWidth - (PANEL_WIDTH * slideEase);
+
+        // Get the agent to display (use selectedAgent or last known for slide-out)
+        const agent = selectedAgent;
+        if (!agent && panelSlideProgress <= 0) return;
+
+        ctx.save();
+
+        // Draw panel background
+        ctx.fillStyle = 'rgba(25, 25, 40, 0.95)';
+        ctx.strokeStyle = 'rgba(80, 80, 120, 0.6)';
+        ctx.lineWidth = 1;
+
+        ctx.beginPath();
+        ctx.rect(panelX, 0, PANEL_WIDTH, canvasHeight);
+        ctx.fill();
+        ctx.stroke();
+
+        // Don't render content if panel is sliding out and we have no agent
+        if (!agent) {
+            ctx.restore();
+            return;
+        }
+
+        const padding = 16;
+        const lineHeight = 20;
+        const sectionGap = 16;
+        let yPos = padding;
+
+        // =====================================================================
+        // Header: Agent name and role
+        // =====================================================================
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 16px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(agent.name, panelX + padding, yPos);
+        yPos += lineHeight;
+
+        ctx.fillStyle = '#888888';
+        ctx.font = '13px sans-serif';
+        ctx.fillText(agent.role.replace(/_/g, ' '), panelX + padding, yPos);
+        yPos += lineHeight + sectionGap;
+
+        // =====================================================================
+        // OODA Phase and Buffer
+        // =====================================================================
+        ctx.fillStyle = '#aaaaaa';
+        ctx.font = '12px sans-serif';
+        ctx.fillText('OODA Phase:', panelX + padding, yPos);
+        ctx.fillStyle = getOodaPhaseColor(agent.ooda_phase);
+        ctx.font = 'bold 12px sans-serif';
+        ctx.fillText(agent.ooda_phase.toUpperCase(), panelX + padding + 85, yPos);
+        yPos += lineHeight;
+
+        ctx.fillStyle = '#aaaaaa';
+        ctx.font = '12px sans-serif';
+        const bufferDepth = agent.input_buffer_depth !== undefined ? agent.input_buffer_depth : 0;
+        ctx.fillText('Buffer Depth: ' + bufferDepth, panelX + padding, yPos);
+        yPos += lineHeight + sectionGap;
+
+        // =====================================================================
+        // Labels Section
+        // =====================================================================
+        const labels = agent.labels || [];
+        if (labels.length > 0) {
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 13px sans-serif';
+            ctx.fillText('Labels', panelX + padding, yPos);
+            yPos += lineHeight;
+
+            ctx.fillStyle = '#cccccc';
+            ctx.font = '12px sans-serif';
+            for (const label of labels) {
+                ctx.fillText('• ' + label, panelX + padding + 8, yPos);
+                yPos += lineHeight - 4;
+            }
+            yPos += sectionGap;
+        }
+
+        // =====================================================================
+        // Genome Traits Section
+        // =====================================================================
+        const genome = agent.genome || {};
+        const traitEntries = Object.entries(genome);
+
+        if (traitEntries.length > 0) {
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 13px sans-serif';
+            ctx.fillText('Genome Traits', panelX + padding, yPos);
+            yPos += lineHeight + 4;
+
+            const barWidth = PANEL_WIDTH - padding * 2 - 100;
+            const barHeight = 12;
+            const labelWidth = 95;
+
+            for (const [trait, value] of traitEntries) {
+                // Trait name
+                ctx.fillStyle = '#cccccc';
+                ctx.font = '11px sans-serif';
+                let traitName = trait.replace(/_/g, ' ');
+                // Truncate long names
+                if (traitName.length > 14) {
+                    traitName = traitName.substring(0, 13) + '...';
+                }
+                ctx.fillText(traitName, panelX + padding, yPos + 1);
+
+                // Bar background
+                const barX = panelX + padding + labelWidth;
+                ctx.fillStyle = 'rgba(60, 60, 80, 0.8)';
+                ctx.fillRect(barX, yPos, barWidth, barHeight);
+
+                // Bar fill
+                const fillWidth = Math.max(0, Math.min(1, value)) * barWidth;
+                ctx.fillStyle = getTraitBarColor(value);
+                ctx.fillRect(barX, yPos, fillWidth, barHeight);
+
+                // Value text
+                ctx.fillStyle = '#ffffff';
+                ctx.font = '10px sans-serif';
+                ctx.textAlign = 'right';
+                ctx.fillText(value.toFixed(2), barX + barWidth - 3, yPos + 1);
+                ctx.textAlign = 'left';
+
+                yPos += barHeight + 6;
+            }
+            yPos += sectionGap;
+        }
+
+        // =====================================================================
+        // Connected Links Section
+        // =====================================================================
+        if (currentFrame && currentFrame.links) {
+            const connectedLinks = currentFrame.links.filter(link =>
+                link.source_id === agent.id || link.dest_id === agent.id
+            );
+
+            if (connectedLinks.length > 0) {
+                ctx.fillStyle = '#ffffff';
+                ctx.font = 'bold 13px sans-serif';
+                ctx.fillText('Connected Links', panelX + padding, yPos);
+                yPos += lineHeight + 4;
+
+                for (const link of connectedLinks) {
+                    // Determine direction
+                    const isSource = link.source_id === agent.id;
+                    const otherAgentId = isSource ? link.dest_id : link.source_id;
+                    const arrow = isSource ? '→' : '←';
+
+                    // Find the other agent's name
+                    let otherName = otherAgentId;
+                    if (currentFrame.agents) {
+                        const otherAgent = currentFrame.agents.find(a => a.id === otherAgentId);
+                        if (otherAgent) {
+                            otherName = otherAgent.name;
+                        }
+                    }
+
+                    // Link type color
+                    ctx.fillStyle = getLinkTypeColor(link.link_type);
+                    ctx.font = '11px sans-serif';
+                    ctx.fillText(arrow + ' ' + otherName, panelX + padding + 8, yPos);
+
+                    // Link type label
+                    ctx.fillStyle = '#888888';
+                    ctx.font = '10px sans-serif';
+                    const typeLabel = '(' + link.link_type + ')';
+                    ctx.fillText(typeLabel, panelX + padding + 120, yPos);
+
+                    yPos += lineHeight - 2;
+                }
+            }
+        }
+
+        ctx.restore();
+    }
+
+    /**
+     * Get color for link type.
+     * @param {string} linkType - Link type
+     * @returns {string} Color string
+     */
+    function getLinkTypeColor(linkType) {
+        switch (linkType) {
+            case 'hierarchical': return '#e74c3c';  // Red
+            case 'peer': return '#3498db';          // Blue
+            case 'service': return '#2ecc71';       // Green
+            case 'competitive': return '#f39c12';   // Orange
+            default: return '#aaaaaa';
+        }
+    }
+
     // =========================================================================
     // Module Export
     // =========================================================================
@@ -347,10 +751,16 @@
         init: init,
         setFrame: setFrame,
         renderTooltip: renderTooltip,
+        renderSelectionRing: renderSelectionRing,
+        renderDetailPanel: renderDetailPanel,
         getAgentHoverState: getAgentHoverState,
         isLinkHighlighted: isLinkHighlighted,
         getHoveredAgent: getHoveredAgent,
-        hitTestAgents: hitTestAgents
+        getSelectedAgent: getSelectedAgent,
+        selectAgent: selectAgent,
+        deselectAgent: deselectAgent,
+        hitTestAgents: hitTestAgents,
+        updateAnimations: updateAnimations
     };
 
 })(typeof window !== 'undefined' ? window : this);

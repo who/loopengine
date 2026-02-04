@@ -358,9 +358,19 @@
             LoopEngineAgents.renderAgents(ctx, frame.agents, animationTime, viewport);
         }
 
-        // Layer 5: Hover/selection overlays (tooltips)
+        // Layer 5: Selection ring overlay (animated dashed circle)
+        if (typeof LoopEngineInteraction !== 'undefined') {
+            LoopEngineInteraction.renderSelectionRing(ctx, animationTime);
+        }
+
+        // Layer 6: Hover tooltips (on top of selection ring)
         if (typeof LoopEngineInteraction !== 'undefined') {
             LoopEngineInteraction.renderTooltip(ctx);
+        }
+
+        // Layer 7: Detail panel (slides in from right, on top of everything)
+        if (typeof LoopEngineInteraction !== 'undefined') {
+            LoopEngineInteraction.renderDetailPanel(ctx, animationTime);
         }
     }
 
