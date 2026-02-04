@@ -152,6 +152,10 @@ AGENT_COLORS: dict[str, str] = {
 }
 
 
+# Maximum particles to render per frame (for frontend performance)
+MAX_RENDERED_PARTICLES = 100
+
+
 def project(world: World) -> Frame:
     """Project World state into a visual Frame.
 
@@ -160,6 +164,10 @@ def project(world: World) -> Frame:
 
     Returns:
         Frame containing all visual elements for rendering
+
+    Note:
+        Limits rendered particles to MAX_RENDERED_PARTICLES to maintain
+        frame rate in the frontend visualization.
     """
     frame = Frame(tick=world.tick, time=world.time)
 
@@ -173,12 +181,16 @@ def project(world: World) -> Frame:
         if link_visual:
             frame.links.append(link_visual)
 
-    # Project particles
+    # Project particles (limited to MAX_RENDERED_PARTICLES for frontend performance)
+    particle_count = 0
     for particle in world.particles.values():
         if particle.alive:
+            if particle_count >= MAX_RENDERED_PARTICLES:
+                break
             particle_visual = _project_particle(particle, world)
             if particle_visual:
                 frame.particles.append(particle_visual)
+                particle_count += 1
 
     # Project label regions
     frame.label_regions = _project_label_regions(world)

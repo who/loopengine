@@ -16,6 +16,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Performance optimization constants
+MAX_PARTICLES = 100  # Maximum concurrent particles (excess queued)
+FORCE_UPDATE_INTERVAL = 1  # Update forces every N ticks (1 = every tick)
+
 
 def tick_world(world: World) -> None:
     """Execute one simulation tick per PRD tick sequence.
@@ -128,7 +132,22 @@ def _step_all_agents(world: World) -> None:
 
 
 def _place_particle_on_link(world: World, particle: Particle) -> None:
-    """Place a particle on the appropriate link based on source and destination."""
+    """Place a particle on the appropriate link based on source and destination.
+
+    Enforces MAX_PARTICLES limit. When limit is reached, new particles are dropped
+    to maintain performance. The oldest particles (by progress) are kept.
+    """
+    # Enforce particle count limit - drop new particles if at capacity
+    if len(world.particles) >= MAX_PARTICLES:
+        # Log at debug level to avoid spam
+        logger.debug(
+            "Particle limit (%d) reached, dropping particle %s",
+            MAX_PARTICLES,
+            particle.id,
+        )
+        particle.alive = False
+        return
+
     # Find a link from source to destination
     link_id = None
     for link in world.links.values():

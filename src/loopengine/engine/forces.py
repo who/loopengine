@@ -32,6 +32,7 @@ class ForceConfig:
     # Agent repulsion
     repulsion_strength: float = 1000.0  # Inverse-square repulsion constant
     min_distance: float = 10.0  # Minimum distance to prevent singularities
+    repulsion_cutoff: float = 500.0  # Skip repulsion for agents beyond this distance
 
     # Hierarchical vertical bias
     vertical_strength: float = 0.5  # Vertical force magnitude
@@ -160,8 +161,10 @@ def _compute_repulsion_forces(world: World, forces: AgentForces, config: ForceCo
     """Compute agent repulsion forces to prevent overlap.
 
     Uses inverse-square law: F = k / d^2
+    Optimized with distance cutoff to skip far-apart agents.
     """
     agents = list(world.agents.values())
+    cutoff_sq = config.repulsion_cutoff * config.repulsion_cutoff
 
     for i, agent_a in enumerate(agents):
         for agent_b in agents[i + 1 :]:
@@ -169,6 +172,11 @@ def _compute_repulsion_forces(world: World, forces: AgentForces, config: ForceCo
             dx = agent_b.x - agent_a.x
             dy = agent_b.y - agent_a.y
             distance_sq = dx * dx + dy * dy
+
+            # Skip if beyond cutoff distance (optimization for large agent counts)
+            if distance_sq > cutoff_sq:
+                continue
+
             distance = math.sqrt(distance_sq)
 
             if distance < config.min_distance:
