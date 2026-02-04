@@ -468,6 +468,11 @@
             }
             LoopEngineControls.renderControlBar(ctx, canvasWidth, canvasHeight);
         }
+
+        // Render GA panel (top-right corner, on top of control bar)
+        if (typeof LoopEngineGA !== 'undefined') {
+            LoopEngineGA.renderGAPanel(ctx, canvasWidth, canvasHeight);
+        }
     }
 
     // =========================================================================

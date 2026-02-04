@@ -57,6 +57,11 @@
             LoopEngineControls.init(canvas, sendControlCommand);
         }
 
+        // Initialize GA module
+        if (typeof LoopEngineGA !== 'undefined') {
+            LoopEngineGA.init(canvas, sendControlCommand);
+        }
+
         // Connect to WebSockets
         connectFramesSocket();
         connectControlSocket();
@@ -150,6 +155,25 @@
                 try {
                     const response = JSON.parse(event.data);
                     console.log('Control response:', response);
+
+                    // Route GA-related messages to GA module
+                    if (typeof LoopEngineGA !== 'undefined') {
+                        if (response.type === 'ga_progress') {
+                            LoopEngineGA.handleGAProgress(response);
+                        } else if (response.type === 'ga_complete') {
+                            LoopEngineGA.handleGAComplete(response);
+                        } else if (response.job_id !== undefined && response.status !== undefined) {
+                            // This is a GA status response
+                            LoopEngineGA.handleGAStatus(response);
+                        } else if (response.job_id !== undefined && response.success !== undefined) {
+                            // This could be start_ga or stop_ga response
+                            if (response.message && response.message.includes('started')) {
+                                LoopEngineGA.handleStartGAResponse(response);
+                            } else if (response.message && response.message.includes('Stop')) {
+                                LoopEngineGA.handleStopGAResponse(response);
+                            }
+                        }
+                    }
                 } catch (e) {
                     console.error('Error parsing control response:', e);
                 }
