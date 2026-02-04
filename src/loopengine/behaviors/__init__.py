@@ -11,13 +11,21 @@ from loopengine.behaviors.llm_client import (
     LLMClientSettings,
     LLMQuery,
 )
+from loopengine.behaviors.prompt_builder import (
+    AgentContext,
+    DomainContext,
+    PromptBuilder,
+)
 
 __all__ = [
+    "AgentContext",
     "BehaviorResponse",
+    "DomainContext",
     "LLMClient",
     "LLMClientSettings",
     "LLMConfig",
     "LLMProvider",
     "LLMQuery",
+    "PromptBuilder",
     "get_llm_config",
 ]
