@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from loopengine.model.agent import Phase
@@ -10,6 +11,8 @@ if TYPE_CHECKING:
     from loopengine.model.agent import Agent
     from loopengine.model.particle import Particle
     from loopengine.model.world import World
+
+logger = logging.getLogger(__name__)
 
 
 def step_agent(agent: Agent, world: World) -> list[Particle]:
@@ -90,6 +93,10 @@ def _do_decide(agent: Agent) -> None:
 
     Invokes agent.policy(sensed_inputs, genome, internal_state) → planned_actions.
     Stores planned_actions in internal_state.
+
+    If the policy raises an exception, the error is logged and the agent continues
+    with an empty action list. This ensures simulation continuity even when
+    individual agent policies fail.
     """
     if agent.phase_tick != 0:
         return  # Only decide at start of phase
@@ -98,8 +105,21 @@ def _do_decide(agent: Agent) -> None:
         return
 
     sensed_inputs = agent.internal_state.get("sensed_inputs", [])
-    planned_actions = agent.policy(sensed_inputs, agent.genome, agent.internal_state)
-    agent.internal_state["planned_actions"] = planned_actions
+    try:
+        planned_actions = agent.policy(sensed_inputs, agent.genome, agent.internal_state)
+        agent.internal_state["planned_actions"] = planned_actions
+    except Exception:
+        # Log error with agent context, continue with empty actions
+        logger.exception(
+            "Policy execution failed for agent '%s' (role=%s). Continuing with empty action list.",
+            agent.id,
+            agent.role,
+        )
+        agent.internal_state["planned_actions"] = []
+        # Track policy failure count for debugging
+        agent.internal_state["_policy_failures"] = (
+            agent.internal_state.get("_policy_failures", 0) + 1
+        )
 
 
 def _do_act(agent: Agent, world: World) -> list[Particle]:

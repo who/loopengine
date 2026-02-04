@@ -381,13 +381,28 @@
      * @param {number} canvasWidth - Canvas width
      * @param {number} canvasHeight - Canvas height
      * @param {boolean} connected - Connection status
+     * @param {string} [connectionStatus] - Optional detailed status ('connecting', 'reconnecting', 'error')
      */
-    function renderOverlay(ctx, frame, canvasWidth, canvasHeight, connected) {
+    function renderOverlay(ctx, frame, canvasWidth, canvasHeight, connected, connectionStatus) {
         if (!connected) {
-            ctx.fillStyle = '#ff6b6b';
+            // Show different messages based on connection status
+            const statusText = connectionStatus === 'reconnecting'
+                ? 'Reconnecting to server...'
+                : connectionStatus === 'error'
+                ? 'Connection error. Retrying...'
+                : 'Connecting to server...';
+
+            const statusColor = connectionStatus === 'error' ? '#ff4444' : '#ff6b6b';
+
+            ctx.fillStyle = statusColor;
             ctx.font = '16px monospace';
             ctx.textAlign = 'center';
-            ctx.fillText('Connecting to server...', canvasWidth / 2, canvasHeight / 2);
+            ctx.fillText(statusText, canvasWidth / 2, canvasHeight / 2);
+
+            // Show reconnection hint
+            ctx.fillStyle = '#888888';
+            ctx.font = '12px monospace';
+            ctx.fillText('Check that the server is running on localhost:8000', canvasWidth / 2, canvasHeight / 2 + 25);
             return;
         }
 

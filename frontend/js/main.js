@@ -14,6 +14,7 @@
     const WS_FRAMES_URL = 'ws://localhost:8000/ws/frames';
     const WS_CONTROL_URL = 'ws://localhost:8000/ws/control';
     const RECONNECT_DELAY_MS = 3000;
+    const MAX_RECONNECT_DELAY_MS = 30000;  // Max delay between reconnection attempts
     const SERVER_FRAME_RATE = 30;  // Expected server frame rate for interpolation
 
     // State
@@ -26,6 +27,11 @@
     let connected = false;
     let animationTime = 0;
     let lastTimestamp = 0;
+
+    // Connection state tracking
+    let framesReconnectAttempts = 0;
+    let controlReconnectAttempts = 0;
+    let connectionStatus = 'connecting';  // 'connected', 'connecting', 'reconnecting', 'error'
 
     /**
      * Initialize the canvas and start the application.
@@ -100,10 +106,24 @@
     }
 
     /**
+     * Calculate reconnection delay with exponential backoff.
+     * @param {number} attempts - Number of reconnection attempts
+     * @returns {number} Delay in milliseconds
+     */
+    function getReconnectDelay(attempts) {
+        const delay = Math.min(
+            RECONNECT_DELAY_MS * Math.pow(1.5, attempts),
+            MAX_RECONNECT_DELAY_MS
+        );
+        return delay;
+    }
+
+    /**
      * Connect to the frames WebSocket endpoint.
      */
     function connectFramesSocket() {
         console.log('Connecting to frames WebSocket:', WS_FRAMES_URL);
+        connectionStatus = framesReconnectAttempts > 0 ? 'reconnecting' : 'connecting';
 
         try {
             framesSocket = new WebSocket(WS_FRAMES_URL);
@@ -111,6 +131,8 @@
             framesSocket.onopen = function() {
                 console.log('Frames WebSocket connected');
                 connected = true;
+                connectionStatus = 'connected';
+                framesReconnectAttempts = 0;  // Reset on successful connection
             };
 
             framesSocket.onmessage = function(event) {
@@ -123,10 +145,13 @@
                         LoopEngineRenderer.pushFrame(frame);
                     }
 
-                    console.log('Frame received:', 'tick=' + frame.tick,
-                                'agents=' + frame.agents.length,
-                                'links=' + frame.links.length,
-                                'particles=' + frame.particles.length);
+                    // Only log every 100th frame to reduce console spam
+                    if (frame.tick % 100 === 0) {
+                        console.log('Frame received:', 'tick=' + frame.tick,
+                                    'agents=' + frame.agents.length,
+                                    'links=' + frame.links.length,
+                                    'particles=' + frame.particles.length);
+                    }
                 } catch (e) {
                     console.error('Error parsing frame data:', e);
                 }
@@ -134,17 +159,26 @@
 
             framesSocket.onerror = function(error) {
                 console.error('Frames WebSocket error:', error);
+                connectionStatus = 'error';
             };
 
             framesSocket.onclose = function(event) {
                 console.log('Frames WebSocket closed:', event.code, event.reason);
                 connected = false;
-                // Attempt to reconnect
-                setTimeout(connectFramesSocket, RECONNECT_DELAY_MS);
+                framesReconnectAttempts++;
+                connectionStatus = 'reconnecting';
+
+                // Attempt to reconnect with exponential backoff
+                const delay = getReconnectDelay(framesReconnectAttempts);
+                console.log('Reconnecting frames WebSocket in', delay, 'ms (attempt', framesReconnectAttempts, ')');
+                setTimeout(connectFramesSocket, delay);
             };
         } catch (e) {
             console.error('Failed to create frames WebSocket:', e);
-            setTimeout(connectFramesSocket, RECONNECT_DELAY_MS);
+            framesReconnectAttempts++;
+            connectionStatus = 'error';
+            const delay = getReconnectDelay(framesReconnectAttempts);
+            setTimeout(connectFramesSocket, delay);
         }
     }
 
@@ -159,12 +193,18 @@
 
             controlSocket.onopen = function() {
                 console.log('Control WebSocket connected');
+                controlReconnectAttempts = 0;  // Reset on successful connection
             };
 
             controlSocket.onmessage = function(event) {
                 try {
                     const response = JSON.parse(event.data);
                     console.log('Control response:', response);
+
+                    // Handle error responses
+                    if (response.success === false) {
+                        console.warn('Control command failed:', response.message);
+                    }
 
                     // Route GA-related messages to GA module
                     if (typeof LoopEngineGA !== 'undefined') {
@@ -195,12 +235,18 @@
 
             controlSocket.onclose = function(event) {
                 console.log('Control WebSocket closed:', event.code, event.reason);
-                // Attempt to reconnect
-                setTimeout(connectControlSocket, RECONNECT_DELAY_MS);
+                controlReconnectAttempts++;
+
+                // Attempt to reconnect with exponential backoff
+                const delay = getReconnectDelay(controlReconnectAttempts);
+                console.log('Reconnecting control WebSocket in', delay, 'ms (attempt', controlReconnectAttempts, ')');
+                setTimeout(connectControlSocket, delay);
             };
         } catch (e) {
             console.error('Failed to create control WebSocket:', e);
-            setTimeout(connectControlSocket, RECONNECT_DELAY_MS);
+            controlReconnectAttempts++;
+            const delay = getReconnectDelay(controlReconnectAttempts);
+            setTimeout(connectControlSocket, delay);
         }
     }
 
@@ -208,16 +254,23 @@
      * Send a control command to the server.
      * @param {string} type - Command type: 'play', 'pause', 'set_speed', 'reset'
      * @param {Object} params - Additional parameters (e.g., {speed: 2.0})
+     * @returns {boolean} True if command was sent, false if connection unavailable
      */
     function sendControlCommand(type, params) {
         if (!controlSocket || controlSocket.readyState !== WebSocket.OPEN) {
-            console.warn('Control WebSocket not connected');
-            return;
+            console.warn('Control WebSocket not connected - command will be dropped:', type);
+            return false;
         }
 
-        const command = { type: type, ...params };
-        controlSocket.send(JSON.stringify(command));
-        console.log('Sent control command:', command);
+        try {
+            const command = { type: type, ...params };
+            controlSocket.send(JSON.stringify(command));
+            console.log('Sent control command:', command);
+            return true;
+        } catch (e) {
+            console.error('Failed to send control command:', type, e);
+            return false;
+        }
     }
 
     /**

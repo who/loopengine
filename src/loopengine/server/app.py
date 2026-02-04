@@ -21,8 +21,9 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum, StrEnum
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, ValidationError
 
 from loopengine.api.behaviors import router as behaviors_router
 from loopengine.api.domains import router as domains_router
@@ -751,6 +752,84 @@ app.include_router(domains_router)
 app.include_router(metrics_router)
 
 
+# Global exception handlers for comprehensive error handling
+
+
+class ErrorResponse(BaseModel):
+    """Standard error response model."""
+
+    error: str = Field(description="Error type/category")
+    detail: str = Field(description="Human-readable error message")
+    status_code: int = Field(description="HTTP status code")
+
+
+@app.exception_handler(ValidationError)
+async def validation_exception_handler(request: Request, exc: ValidationError) -> JSONResponse:
+    """Handle Pydantic validation errors with clear messages.
+
+    Returns a 422 Unprocessable Entity response with validation details.
+    """
+    logger.warning(
+        "Validation error on %s %s: %s",
+        request.method,
+        request.url.path,
+        str(exc),
+    )
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "error": "validation_error",
+            "detail": str(exc),
+            "status_code": status.HTTP_422_UNPROCESSABLE_ENTITY,
+        },
+    )
+
+
+@app.exception_handler(ValueError)
+async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
+    """Handle ValueError exceptions with 400 Bad Request.
+
+    Used for invalid input values that pass validation but are semantically wrong.
+    """
+    logger.warning(
+        "Value error on %s %s: %s",
+        request.method,
+        request.url.path,
+        str(exc),
+    )
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={
+            "error": "invalid_value",
+            "detail": str(exc),
+            "status_code": status.HTTP_400_BAD_REQUEST,
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Handle unexpected exceptions with 500 Internal Server Error.
+
+    Logs the full exception with traceback for debugging while returning
+    a safe error message to the client.
+    """
+    logger.exception(
+        "Unhandled exception on %s %s: %s",
+        request.method,
+        request.url.path,
+        str(exc),
+    )
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "error": "internal_error",
+            "detail": "An unexpected error occurred. Please check server logs.",
+            "status_code": status.HTTP_500_INTERNAL_SERVER_ERROR,
+        },
+    )
+
+
 # Pydantic models for REST responses
 
 
@@ -1338,6 +1417,8 @@ async def websocket_frames(websocket: WebSocket) -> None:
 
     Streams Frame objects containing all visual elements for rendering.
     Send empty dict {} if no frame is available yet.
+
+    Handles disconnection gracefully and logs errors with context.
     """
     await manager.connect_frames(websocket)
     sim = get_sim_state()
@@ -1372,9 +1453,13 @@ async def websocket_frames(websocket: WebSocket) -> None:
             await asyncio.sleep(sleep_time)
 
     except WebSocketDisconnect:
+        logger.info("Frame WebSocket client disconnected gracefully")
         manager.disconnect_frames(websocket)
-    except Exception as e:
-        logger.error("Frame streaming error: %s", str(e))
+    except asyncio.CancelledError:
+        logger.info("Frame WebSocket connection cancelled")
+        manager.disconnect_frames(websocket)
+    except Exception:
+        logger.exception("Frame streaming error (client will be disconnected)")
         manager.disconnect_frames(websocket)
 
 
@@ -1535,48 +1620,68 @@ async def websocket_control(websocket: WebSocket) -> None:
     Server broadcasts:
     - {"type": "ga_progress", "job_id": string, "generation": number, "best_fitness": number}
     - {"type": "ga_complete", "job_id": string, "best_genome": object}
+
+    Handles JSON parsing errors and invalid commands gracefully.
     """
     await manager.connect_control(websocket)
     sim = get_sim_state()
 
     try:
         while True:
-            data = await websocket.receive_json()
+            # Handle JSON parsing errors gracefully
+            try:
+                data = await websocket.receive_json()
+            except ValueError as json_err:
+                logger.warning("Invalid JSON received on control WebSocket: %s", json_err)
+                await websocket.send_json({"success": False, "message": "Invalid JSON format"})
+                continue
+
             cmd_type = data.get("type", "").lower()
 
             response: dict[str, Any] = {"success": False, "message": "Unknown command"}
 
-            if cmd_type == "play":
-                sim.paused = False
-                response = {"success": True, "message": "Simulation playing"}
-            elif cmd_type == "pause":
-                sim.paused = True
-                response = {"success": True, "message": "Simulation paused"}
-            elif cmd_type == "set_speed":
-                speed = data.get("speed", 1.0)
-                try:
-                    sim.speed = float(speed)
-                    response = {"success": True, "message": f"Speed set to {sim.speed}"}
-                except (TypeError, ValueError):
-                    response = {"success": False, "message": "Invalid speed value"}
-            elif cmd_type == "reset":
-                sim.reset()
-                response = {"success": True, "message": "World reset"}
-            elif cmd_type == "start_ga":
-                response = _handle_start_ga(data)
-            elif cmd_type == "stop_ga":
-                response = _handle_stop_ga(data)
-            elif cmd_type == "get_ga_status":
-                response = _handle_get_ga_status(data)
-            else:
-                response = {"success": False, "message": f"Unknown command: {cmd_type}"}
+            try:
+                if cmd_type == "play":
+                    sim.paused = False
+                    response = {"success": True, "message": "Simulation playing"}
+                elif cmd_type == "pause":
+                    sim.paused = True
+                    response = {"success": True, "message": "Simulation paused"}
+                elif cmd_type == "set_speed":
+                    speed = data.get("speed", 1.0)
+                    try:
+                        sim.speed = float(speed)
+                        response = {"success": True, "message": f"Speed set to {sim.speed}"}
+                    except (TypeError, ValueError):
+                        response = {"success": False, "message": "Invalid speed value"}
+                elif cmd_type == "reset":
+                    sim.reset()
+                    response = {"success": True, "message": "World reset"}
+                elif cmd_type == "start_ga":
+                    response = _handle_start_ga(data)
+                elif cmd_type == "stop_ga":
+                    response = _handle_stop_ga(data)
+                elif cmd_type == "get_ga_status":
+                    response = _handle_get_ga_status(data)
+                else:
+                    response = {"success": False, "message": f"Unknown command: {cmd_type}"}
+            except Exception:
+                logger.exception("Error processing control command '%s'", cmd_type)
+                response = {
+                    "success": False,
+                    "message": f"Error processing command '{cmd_type}'",
+                }
 
             await websocket.send_json(response)
 
     except WebSocketDisconnect:
+        logger.info("Control WebSocket client disconnected gracefully")
         manager.disconnect_control(websocket)
-    except Exception as e:
-        logger.error("Control WebSocket error: %s", str(e))
+    except asyncio.CancelledError:
+        logger.info("Control WebSocket connection cancelled")
+        manager.disconnect_control(websocket)
+    except Exception:
+        logger.exception("Control WebSocket error (client will be disconnected)")
         manager.disconnect_control(websocket)
 
 
