@@ -1,5 +1,9 @@
 """AI behavior system for dynamic LLM-driven agent behaviors."""
 
+from loopengine.behaviors.ai_behavior_engine import (
+    AIBehaviorEngine,
+    AIBehaviorEngineError,
+)
 from loopengine.behaviors.config import (
     LLMConfig,
     LLMProvider,
@@ -22,6 +26,8 @@ from loopengine.behaviors.response_parser import (
 )
 
 __all__ = [
+    "AIBehaviorEngine",
+    "AIBehaviorEngineError",
     "AgentContext",
     "BehaviorResponse",
     "DomainContext",
