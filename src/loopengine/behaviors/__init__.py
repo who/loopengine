@@ -17,6 +17,11 @@ from loopengine.behaviors.behavior_history import (
     BehaviorHistoryStore,
     StoredBehavior,
 )
+from loopengine.behaviors.behavior_pin_store import (
+    BehaviorPinStore,
+    BehaviorPinStoreError,
+    PinnedBehavior,
+)
 from loopengine.behaviors.cache_key_generator import (
     CacheKeyGenerator,
     generate_key,
@@ -101,6 +106,8 @@ __all__ = [
     "AlertSeverity",
     "BehaviorCache",
     "BehaviorHistoryStore",
+    "BehaviorPinStore",
+    "BehaviorPinStoreError",
     "BehaviorResponse",
     "CacheEntry",
     "CacheKeyGenerator",
@@ -126,6 +133,7 @@ __all__ = [
     "LLMQuery",
     "LatencyAlert",
     "LatencyTracker",
+    "PinnedBehavior",
     "PromptBuilder",
     "RateLimitConfig",
     "RateLimitError",
