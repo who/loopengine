@@ -10,6 +10,14 @@ from loopengine.discovery.discoverer import (
     discover_schemas,
     migrate_genome,
 )
+from loopengine.discovery.triggers import (
+    RediscoveryTriggerManager,
+    ScheduledTriggerConfig,
+    StagnationConfig,
+    TriggerEvent,
+    TriggerType,
+    extract_system_description,
+)
 
 __all__ = [
     "VALID_CATEGORIES",
@@ -18,6 +26,12 @@ __all__ = [
     "DiscoveryError",
     "DiscoveryResult",
     "MigrationResult",
+    "RediscoveryTriggerManager",
+    "ScheduledTriggerConfig",
+    "StagnationConfig",
+    "TriggerEvent",
+    "TriggerType",
     "discover_schemas",
+    "extract_system_description",
     "migrate_genome",
 ]
