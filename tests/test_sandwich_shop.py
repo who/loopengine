@@ -1,6 +1,16 @@
 """Tests for the Sandwich Shop corpus."""
 
-from loopengine.corpora.sandwich_shop import create_labels, create_links, create_world
+from loopengine.corpora.sandwich_shop import (
+    EXTRAS,
+    SANDWICH_TYPES,
+    SPECIAL_REQUESTS,
+    create_external_inputs,
+    create_labels,
+    create_links,
+    create_world,
+    customer_arrival_schedule,
+    generate_customer_order_payload,
+)
 from loopengine.model import LinkType
 
 
@@ -236,3 +246,110 @@ def test_create_world_has_labels() -> None:
     assert len(world.labels) == 5
     assert "SandwichShop" in world.labels
     assert "Kitchen" in world.labels
+
+
+# ============================================================================
+# EXTERNAL INPUT TESTS (PRD Section 9.5)
+# ============================================================================
+
+
+def test_external_inputs_count() -> None:
+    """Verify 1 external input is created (customer_arrivals)."""
+    inputs = create_external_inputs()
+    assert len(inputs) == 1
+
+
+def test_customer_arrivals_external_input() -> None:
+    """Verify customer_arrivals external input targeting Alex with rate=0.05."""
+    inputs = create_external_inputs()
+    customer_arrivals = inputs[0]
+
+    assert customer_arrivals.name == "customer_arrivals"
+    assert customer_arrivals.target_agent_id == "alex"
+    assert customer_arrivals.rate == 0.05
+    assert customer_arrivals.variance == 0.3
+    assert customer_arrivals.particle_type == "customer_order"
+
+
+def test_customer_arrival_schedule_normal() -> None:
+    """Verify schedule returns 1.0 outside lunch rush (ticks < 200 and > 400)."""
+    assert customer_arrival_schedule(0) == 1.0
+    assert customer_arrival_schedule(100) == 1.0
+    assert customer_arrival_schedule(199) == 1.0
+    assert customer_arrival_schedule(401) == 1.0
+    assert customer_arrival_schedule(500) == 1.0
+
+
+def test_customer_arrival_schedule_rush() -> None:
+    """Verify schedule returns 2.0 during lunch rush (ticks 200-400)."""
+    assert customer_arrival_schedule(200) == 2.0
+    assert customer_arrival_schedule(250) == 2.0
+    assert customer_arrival_schedule(300) == 2.0
+    assert customer_arrival_schedule(400) == 2.0
+
+
+def test_payload_generator_structure() -> None:
+    """Verify payload generator returns dict with sandwich_type, extras, special_requests."""
+    payload = generate_customer_order_payload()
+
+    assert "sandwich_type" in payload
+    assert "extras" in payload
+    assert "special_requests" in payload
+
+
+def test_payload_generator_sandwich_type() -> None:
+    """Verify sandwich_type is from valid list."""
+    for _ in range(20):  # Test multiple times due to randomness
+        payload = generate_customer_order_payload()
+        assert payload["sandwich_type"] in SANDWICH_TYPES
+
+
+def test_payload_generator_extras() -> None:
+    """Verify extras are from valid list and count is 0-2."""
+    for _ in range(20):
+        payload = generate_customer_order_payload()
+        extras = payload["extras"]
+        assert len(extras) <= 2
+        for extra in extras:
+            assert extra in EXTRAS
+
+
+def test_payload_generator_special_requests() -> None:
+    """Verify special_requests are from valid list and count is 0-1."""
+    for _ in range(20):
+        payload = generate_customer_order_payload()
+        requests = payload["special_requests"]
+        assert len(requests) <= 1
+        for req in requests:
+            assert req in SPECIAL_REQUESTS
+
+
+def test_external_input_has_callable_schedule() -> None:
+    """Verify external input schedule is callable and returns rate multiplier."""
+    inputs = create_external_inputs()
+    customer_arrivals = inputs[0]
+
+    # Schedule should be callable
+    assert callable(customer_arrivals.schedule)
+    # Check it returns expected values
+    assert customer_arrivals.schedule(100) == 1.0
+    assert customer_arrivals.schedule(250) == 2.0
+
+
+def test_external_input_has_callable_payload_generator() -> None:
+    """Verify external input payload_generator is callable and returns dict."""
+    inputs = create_external_inputs()
+    customer_arrivals = inputs[0]
+
+    # Payload generator should be callable
+    assert callable(customer_arrivals.payload_generator)
+    # Check it returns a dict
+    payload = customer_arrivals.payload_generator()
+    assert isinstance(payload, dict)
+
+
+def test_create_world_has_external_inputs() -> None:
+    """Verify create_world populates world.external_inputs."""
+    world = create_world()
+    assert len(world.external_inputs) == 1
+    assert world.external_inputs[0].name == "customer_arrivals"

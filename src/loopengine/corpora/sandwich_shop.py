@@ -6,7 +6,15 @@ agents, links, labels, and external inputs.
 
 from __future__ import annotations
 
-from loopengine.model import Label, LabelContext, Link, LinkType, World
+import random
+from typing import Any
+
+from loopengine.model import ExternalInput, Label, LabelContext, Link, LinkType, World
+
+# Sandwich types and extras for payload generation
+SANDWICH_TYPES = ["BLT", "Club", "Reuben", "Turkey", "Veggie", "Philly"]
+EXTRAS = ["extra_cheese", "avocado", "bacon", "pickles", "hot_peppers"]
+SPECIAL_REQUESTS = ["no_mayo", "gluten_free_bread", "toasted", "cut_in_half", "extra_sauce"]
 
 
 def create_links() -> dict[str, Link]:
@@ -102,6 +110,57 @@ def create_links() -> dict[str, Link]:
     return links
 
 
+def generate_customer_order_payload() -> dict[str, Any]:
+    """Generate a random customer order payload.
+
+    Returns:
+        dict: Order details with sandwich type, extras, and special requests.
+    """
+    return {
+        "sandwich_type": random.choice(SANDWICH_TYPES),
+        "extras": random.sample(EXTRAS, k=random.randint(0, 2)),
+        "special_requests": random.sample(SPECIAL_REQUESTS, k=random.randint(0, 1)),
+    }
+
+
+def customer_arrival_schedule(tick: int) -> float:
+    """Return the rate multiplier for customer arrivals based on tick.
+
+    Lunch rush doubles the rate between ticks 200-400.
+
+    Args:
+        tick: Current simulation tick.
+
+    Returns:
+        float: Rate multiplier (2.0 during lunch rush, 1.0 otherwise).
+    """
+    if 200 <= tick <= 400:
+        return 2.0
+    return 1.0
+
+
+def create_external_inputs() -> list[ExternalInput]:
+    """Create external inputs for the sandwich shop per PRD section 9.5.
+
+    External inputs:
+    - customer_arrivals: Customer orders targeting Alex at rate 0.05/tick
+
+    Returns:
+        list[ExternalInput]: External inputs for the world.
+    """
+    return [
+        ExternalInput(
+            name="customer_arrivals",
+            target_agent_id="alex",
+            rate=0.05,
+            variance=0.3,
+            particle_type="customer_order",
+            payload_generator=generate_customer_order_payload,
+            schedule=customer_arrival_schedule,
+        ),
+    ]
+
+
 def create_labels() -> dict[str, Label]:
     """Create the 5 labels for the sandwich shop per PRD section 9.4.
 
@@ -167,12 +226,13 @@ def create_labels() -> dict[str, Label]:
 
 
 def create_world() -> World:
-    """Create the sandwich shop world with links and labels.
+    """Create the sandwich shop world with links, labels, and external inputs.
 
     Returns:
-        World: A world containing the sandwich shop links and labels.
+        World: A world containing the sandwich shop links, labels, and external inputs.
     """
     world = World()
     world.links = create_links()
     world.labels = create_labels()
+    world.external_inputs = create_external_inputs()
     return world
