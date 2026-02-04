@@ -10,16 +10,15 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
@@ -32,10 +31,83 @@ jobs:
           uv run ruff check .
           uv run ruff format --check .
 
-      - name: Test
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run unit tests
         run: |
-          if find tests/ -name "test_*.py" -o -name "*_test.py" 2>/dev/null | grep -q .; then
-            uv run pytest tests/ -v
-          else
-            echo "No test files found, skipping tests"
-          fi
+          uv run pytest tests/ --ignore=tests/e2e -v
+
+  e2e-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Install Playwright browsers
+        run: uv run playwright install --with-deps chromium
+
+      - name: Start backend server
+        run: |
+          uv run uvicorn loopengine.server.app:app --port 8000 &
+          echo "Backend started in background"
+
+      - name: Start frontend server
+        run: |
+          uv run python -m http.server 8080 &
+          echo "Frontend started in background"
+
+      - name: Wait for servers to be ready
+        run: |
+          echo "Waiting for backend..."
+          for i in {1..30}; do
+            if curl -s http://localhost:8000/health > /dev/null 2>&1; then
+              echo "Backend is ready"
+              break
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 1
+          done
+
+          echo "Waiting for frontend..."
+          for i in {1..30}; do
+            if curl -s http://localhost:8080/frontend/index.html > /dev/null 2>&1; then
+              echo "Frontend is ready"
+              break
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 1
+          done
+
+      - name: Run e2e tests
+        run: |
+          uv run pytest tests/e2e/ -v --browser chromium
+
+      - name: Stop servers
+        if: always()
+        run: |
+          pkill -f "uvicorn loopengine.server.app" || true
+          pkill -f "http.server 8080" || true
