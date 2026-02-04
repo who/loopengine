@@ -27,7 +27,8 @@ from pydantic import BaseModel, Field
 from loopengine.api.behaviors import router as behaviors_router
 from loopengine.api.domains import router as domains_router
 from loopengine.api.metrics import router as metrics_router
-from loopengine.corpora.sandwich_shop import create_world
+from loopengine.corpora.sandwich_shop import create_world as create_sandwich_shop_world
+from loopengine.corpora.software_team import create_world as create_software_team_world
 from loopengine.discovery import Discoverer, DiscoveryError, migrate_genome
 from loopengine.engine.fitness import alex_fitness, maria_fitness, tom_fitness
 from loopengine.engine.ga import GAEngine
@@ -52,9 +53,16 @@ class SimulationState:
     the background simulation thread and WebSocket/REST endpoints.
     """
 
+    # Available corpora and their factory functions
+    AVAILABLE_CORPORA: ClassVar[dict[str, tuple[str, Any]]] = {
+        "sandwich_shop": ("Sandwich Shop", create_sandwich_shop_world),
+        "software_team": ("Software Team", create_software_team_world),
+    }
+
     def __init__(self) -> None:
         """Initialize simulation state with default values."""
-        self._world = create_world()
+        self._world = create_sandwich_shop_world()
+        self._current_corpus = "sandwich_shop"
         self._running = False
         self._speed = 1.0  # Simulation speed multiplier
         self._paused = True  # Start paused
@@ -68,6 +76,12 @@ class SimulationState:
         """Get current world state (thread-safe)."""
         with self._lock:
             return self._world
+
+    @property
+    def current_corpus(self) -> str:
+        """Get the name of the current corpus."""
+        with self._lock:
+            return self._current_corpus
 
     @property
     def paused(self) -> bool:
@@ -106,9 +120,10 @@ class SimulationState:
             self._latest_frame = project(self._world)
 
     def reset(self) -> None:
-        """Reset world to initial state."""
+        """Reset world to initial state (reloads current corpus)."""
         with self._lock:
-            self._world = create_world()
+            _, factory = self.AVAILABLE_CORPORA[self._current_corpus]
+            self._world = factory()
             self._latest_frame = None
 
     def load_corpus(self, corpus_name: str) -> None:
@@ -120,12 +135,27 @@ class SimulationState:
         Raises:
             ValueError: If corpus name is not recognized.
         """
+        if corpus_name not in self.AVAILABLE_CORPORA:
+            valid = ", ".join(self.AVAILABLE_CORPORA.keys())
+            raise ValueError(f"Unknown corpus: {corpus_name}. Valid: {valid}")
+
         with self._lock:
-            if corpus_name == "sandwich_shop":
-                self._world = create_world()
-                self._latest_frame = None
-            else:
-                raise ValueError(f"Unknown corpus: {corpus_name}")
+            _, factory = self.AVAILABLE_CORPORA[corpus_name]
+            self._world = factory()
+            self._current_corpus = corpus_name
+            self._latest_frame = None
+
+    @classmethod
+    def list_corpora(cls) -> list[dict[str, str]]:
+        """List all available corpora.
+
+        Returns:
+            List of dicts with 'id' and 'name' for each corpus.
+        """
+        return [
+            {"id": corpus_id, "name": display_name}
+            for corpus_id, (display_name, _) in cls.AVAILABLE_CORPORA.items()
+        ]
 
     def start(self) -> None:
         """Start the background simulation thread."""
@@ -327,8 +357,8 @@ class GAJobManager:
             # Get role configuration
             target_agent_id, fitness_fn = self.ROLE_CONFIG[job.role]
 
-            # Create a fresh world template for evaluation
-            world_template = create_world()
+            # Create a fresh world template for evaluation (sandwich_shop only for GA)
+            world_template = create_sandwich_shop_world()
 
             # Get the target agent to extract schema from genome keys
             target_agent = world_template.agents[target_agent_id]
@@ -758,6 +788,21 @@ class WorldStateResponse(BaseModel):
     agent_count: int = Field(description="Number of agents")
     link_count: int = Field(description="Number of links")
     particle_count: int = Field(description="Number of active particles")
+    current_corpus: str = Field(description="Currently loaded corpus ID")
+
+
+class CorpusInfo(BaseModel):
+    """Response model for corpus information."""
+
+    id: str = Field(description="Unique corpus identifier")
+    name: str = Field(description="Human-readable corpus name")
+
+
+class CorporaListResponse(BaseModel):
+    """Response model for listing available corpora."""
+
+    corpora: list[CorpusInfo] = Field(description="List of available corpora")
+    current: str = Field(description="Currently loaded corpus ID")
 
 
 class SchemaResponse(BaseModel):
@@ -869,6 +914,25 @@ async def get_world() -> WorldStateResponse:
         agent_count=len(world.agents),
         link_count=len(world.links),
         particle_count=len(world.particles),
+        current_corpus=sim.current_corpus,
+    )
+
+
+@app.get("/api/corpora", response_model=CorporaListResponse, tags=["world"])
+async def list_corpora() -> CorporaListResponse:
+    """List all available corpora.
+
+    Returns a list of available corpora with their IDs and display names,
+    plus the ID of the currently loaded corpus.
+    """
+    sim = get_sim_state()
+    corpora_list = [
+        CorpusInfo(id=corpus["id"], name=corpus["name"])
+        for corpus in SimulationState.list_corpora()
+    ]
+    return CorporaListResponse(
+        corpora=corpora_list,
+        current=sim.current_corpus,
     )
 
 

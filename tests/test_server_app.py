@@ -91,11 +91,68 @@ class TestSimulationState:
         sim_state.load_corpus("sandwich_shop")
         assert sim_state.world.tick == 0
         assert len(sim_state.world.agents) == 3  # Maria, Tom, Alex
+        assert sim_state.current_corpus == "sandwich_shop"
+
+    def test_load_corpus_software_team(self, sim_state: SimulationState) -> None:
+        """Test loading software team corpus."""
+        sim_state.tick()
+        sim_state.load_corpus("software_team")
+        assert sim_state.world.tick == 0
+        assert len(sim_state.world.agents) == 4  # PM, Dev1, Dev2, Designer
+        assert sim_state.current_corpus == "software_team"
+
+        # Verify agent IDs
+        agent_ids = set(sim_state.world.agents.keys())
+        assert "pm" in agent_ids
+        assert "dev1" in agent_ids
+        assert "dev2" in agent_ids
+        assert "designer" in agent_ids
 
     def test_load_corpus_unknown_raises(self, sim_state: SimulationState) -> None:
         """Test that loading unknown corpus raises ValueError."""
         with pytest.raises(ValueError, match="Unknown corpus"):
             sim_state.load_corpus("nonexistent_corpus")
+
+    def test_current_corpus_property(self, sim_state: SimulationState) -> None:
+        """Test current_corpus property."""
+        assert sim_state.current_corpus == "sandwich_shop"
+        sim_state.load_corpus("software_team")
+        assert sim_state.current_corpus == "software_team"
+        sim_state.load_corpus("sandwich_shop")
+        assert sim_state.current_corpus == "sandwich_shop"
+
+    def test_list_corpora_class_method(self) -> None:
+        """Test list_corpora class method."""
+        corpora = SimulationState.list_corpora()
+        assert isinstance(corpora, list)
+        assert len(corpora) == 2
+
+        corpus_ids = {c["id"] for c in corpora}
+        assert "sandwich_shop" in corpus_ids
+        assert "software_team" in corpus_ids
+
+        for corpus in corpora:
+            assert "id" in corpus
+            assert "name" in corpus
+            assert isinstance(corpus["id"], str)
+            assert isinstance(corpus["name"], str)
+
+    def test_reset_preserves_current_corpus(self, sim_state: SimulationState) -> None:
+        """Test that reset reloads the current corpus, not default."""
+        # Load software team
+        sim_state.load_corpus("software_team")
+        assert len(sim_state.world.agents) == 4
+
+        # Advance simulation
+        for _ in range(5):
+            sim_state.tick()
+        assert sim_state.world.tick > 0
+
+        # Reset - should reload software team, not sandwich shop
+        sim_state.reset()
+        assert sim_state.world.tick == 0
+        assert len(sim_state.world.agents) == 4  # Still software team
+        assert sim_state.current_corpus == "software_team"
 
     def test_thread_safety(self, sim_state: SimulationState) -> None:
         """Test thread-safe access to state."""
@@ -273,10 +330,60 @@ class TestRESTEndpoints:
         data = response.json()
         assert data["success"] is True
 
+    def test_load_corpus_software_team(self, client: TestClient) -> None:
+        """Test POST /api/world/load_corpus with software_team corpus."""
+        response = client.post("/api/world/load_corpus?corpus_name=software_team")
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["success"] is True
+
+        # Verify software team agents are loaded
+        response = client.get("/api/agents")
+        agents = response.json()
+        assert len(agents) == 4  # PM, Dev1, Dev2, Designer
+        agent_ids = {a["id"] for a in agents}
+        assert "pm" in agent_ids
+        assert "dev1" in agent_ids
+        assert "dev2" in agent_ids
+        assert "designer" in agent_ids
+
+        # Reset back to sandwich shop for other tests
+        client.post("/api/world/load_corpus?corpus_name=sandwich_shop")
+
     def test_load_corpus_unknown(self, client: TestClient) -> None:
         """Test POST /api/world/load_corpus with unknown corpus."""
         response = client.post("/api/world/load_corpus?corpus_name=unknown")
         assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_list_corpora(self, client: TestClient) -> None:
+        """Test GET /api/corpora endpoint."""
+        response = client.get("/api/corpora")
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+
+        # Check structure
+        assert "corpora" in data
+        assert "current" in data
+        assert isinstance(data["corpora"], list)
+        assert len(data["corpora"]) == 2  # sandwich_shop and software_team
+
+        # Check corpus entries
+        corpus_ids = {c["id"] for c in data["corpora"]}
+        assert "sandwich_shop" in corpus_ids
+        assert "software_team" in corpus_ids
+
+        # Check each corpus has required fields
+        for corpus in data["corpora"]:
+            assert "id" in corpus
+            assert "name" in corpus
+
+    def test_get_world_includes_current_corpus(self, client: TestClient) -> None:
+        """Test that GET /api/world includes current_corpus field."""
+        response = client.get("/api/world")
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert "current_corpus" in data
+        assert data["current_corpus"] in ["sandwich_shop", "software_team"]
 
     def test_pause_simulation(self, client: TestClient) -> None:
         """Test POST /api/world/pause endpoint."""

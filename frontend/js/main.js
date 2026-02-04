@@ -67,6 +67,11 @@
             LoopEngineDiscovery.init(canvas);
         }
 
+        // Initialize Corpus selector module
+        if (typeof LoopEngineCorpus !== 'undefined') {
+            LoopEngineCorpus.init(canvas);
+        }
+
         // Connect to WebSockets
         connectFramesSocket();
         connectControlSocket();
