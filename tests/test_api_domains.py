@@ -12,6 +12,7 @@ from pydantic import SecretStr
 from loopengine.api.domains import (
     CreateDomainRequest,
     CreateDomainResponse,
+    GetDomainResponse,
     _generate_domain_id,
     router,
 )
@@ -503,3 +504,213 @@ class TestRouterIntegration:
         routes = [r for r in router.routes if r.path == "/api/v1/domains"]
         assert len(routes) == 1
         assert "POST" in routes[0].methods
+
+    def test_get_endpoint_exists(self) -> None:
+        """Test GET endpoint is registered."""
+        routes = [r for r in router.routes if r.path == "/api/v1/domains/{domain_id}"]
+        assert len(routes) == 1
+        assert "GET" in routes[0].methods
+
+
+class TestGetDomainEndpoint:
+    """Tests for the GET /api/v1/domains/{domain_id} endpoint."""
+
+    def test_get_domain_success(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+        sample_schema: DomainSchema,
+    ) -> None:
+        """Test successful domain retrieval."""
+        # Pre-populate storage
+        store = DomainStore(storage_dir=temp_storage_dir)
+        store.save("test_shop", sample_schema)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.get("/api/v1/domains/test_shop")
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["domain_id"] == "test_shop"
+        assert data["schema"]["domain_type"] == "sandwich shop"
+        assert len(data["schema"]["agent_types"]) == 2
+        assert data["metadata"]["version"] == 1
+        assert "created_at" in data["metadata"]
+        assert "updated_at" in data["metadata"]
+
+    def test_get_domain_not_found_returns_404(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+    ) -> None:
+        """Test that non-existent domain returns 404."""
+        store = DomainStore(storage_dir=temp_storage_dir)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.get("/api/v1/domains/nonexistent")
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        assert "not found" in response.json()["detail"].lower()
+
+    def test_get_domain_returns_latest_version(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+        sample_schema: DomainSchema,
+    ) -> None:
+        """Test that GET returns the latest version after updates."""
+        store = DomainStore(storage_dir=temp_storage_dir)
+        store.save("versioned_shop", sample_schema)
+        store.save("versioned_shop", sample_schema)  # Version 2
+        store.save("versioned_shop", sample_schema)  # Version 3
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.get("/api/v1/domains/versioned_shop")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["metadata"]["version"] == 3
+
+    def test_get_domain_matches_stored_data(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+        sample_schema: DomainSchema,
+    ) -> None:
+        """Test that response matches stored domain exactly."""
+        store = DomainStore(storage_dir=temp_storage_dir)
+        stored = store.save("exact_match", sample_schema)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.get("/api/v1/domains/exact_match")
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+
+        # Verify schema matches
+        assert data["schema"]["domain_type"] == stored.schema_.domain_type
+        assert data["schema"]["description"] == stored.schema_.description
+        assert len(data["schema"]["agent_types"]) == len(stored.schema_.agent_types)
+
+        # Verify metadata matches
+        assert data["metadata"]["domain_id"] == stored.metadata.domain_id
+        assert data["metadata"]["version"] == stored.metadata.version
+        assert data["metadata"]["created_at"] == stored.metadata.created_at
+        assert data["metadata"]["updated_at"] == stored.metadata.updated_at
+
+    def test_get_domain_includes_all_agent_types(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+        sample_schema: DomainSchema,
+    ) -> None:
+        """Test that response includes all agent types from schema."""
+        store = DomainStore(storage_dir=temp_storage_dir)
+        store.save("agent_types_test", sample_schema)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.get("/api/v1/domains/agent_types_test")
+
+        assert response.status_code == status.HTTP_200_OK
+        agent_types = response.json()["schema"]["agent_types"]
+        assert len(agent_types) == 2
+
+        agent_names = [a["name"] for a in agent_types]
+        assert "sandwich_maker" in agent_names
+        assert "customer" in agent_names
+
+    def test_get_domain_with_hyphens(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+        sample_schema: DomainSchema,
+    ) -> None:
+        """Test retrieval of domain with hyphenated ID."""
+        store = DomainStore(storage_dir=temp_storage_dir)
+        store.save("my-shop-v1", sample_schema)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.get("/api/v1/domains/my-shop-v1")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["domain_id"] == "my-shop-v1"
+
+    def test_get_domain_with_underscores(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+        sample_schema: DomainSchema,
+    ) -> None:
+        """Test retrieval of domain with underscored ID."""
+        store = DomainStore(storage_dir=temp_storage_dir)
+        store.save("my_shop_v1", sample_schema)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.get("/api/v1/domains/my_shop_v1")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["domain_id"] == "my_shop_v1"
+
+    def test_get_domain_404_message_includes_domain_id(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+    ) -> None:
+        """Test that 404 error message includes the requested domain_id."""
+        store = DomainStore(storage_dir=temp_storage_dir)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.get("/api/v1/domains/specific_missing_id")
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        assert "specific_missing_id" in response.json()["detail"]
+
+
+class TestGetDomainResponse:
+    """Tests for the GetDomainResponse model."""
+
+    def test_response_serialization(self, sample_schema: DomainSchema) -> None:
+        """Test response serializes correctly."""
+        from loopengine.behaviors import DomainMetadata
+
+        metadata = DomainMetadata(
+            domain_id="test",
+            version=1,
+            created_at="2024-01-01T00:00:00Z",
+            updated_at="2024-01-01T00:00:00Z",
+        )
+
+        response = GetDomainResponse(
+            domain_id="test",
+            schema=sample_schema,
+            metadata=metadata,
+        )
+
+        data = response.model_dump(by_alias=True)
+        assert "schema" in data
+        assert "schema_" not in data
+        assert data["domain_id"] == "test"
+        assert data["schema"]["domain_type"] == "sandwich shop"
+        assert data["metadata"]["version"] == 1
+
+    def test_response_from_stored_domain(self, sample_schema: DomainSchema) -> None:
+        """Test creating response from a StoredDomain."""
+        from loopengine.behaviors import DomainMetadata
+        from loopengine.behaviors.domain_store import StoredDomain
+
+        metadata = DomainMetadata(
+            domain_id="stored_test",
+            version=2,
+            created_at="2024-01-01T00:00:00Z",
+            updated_at="2024-01-02T00:00:00Z",
+        )
+
+        stored = StoredDomain(metadata=metadata, schema=sample_schema)
+
+        response = GetDomainResponse(
+            domain_id=stored.metadata.domain_id,
+            schema=stored.schema_,
+            metadata=stored.metadata,
+        )
+
+        assert response.domain_id == "stored_test"
+        assert response.metadata.version == 2

@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
 from loopengine.behaviors import (
+    DomainMetadata,
     DomainParser,
     DomainParserError,
     DomainSchema,
@@ -66,6 +67,16 @@ class CreateDomainResponse(BaseModel):
     domain_id: str = Field(description="Unique identifier for the created domain")
     schema_: DomainSchema = Field(alias="schema", description="Extracted domain schema")
     metadata: dict[str, Any] = Field(description="Domain metadata including version")
+
+    model_config = {"populate_by_name": True}
+
+
+class GetDomainResponse(BaseModel):
+    """Response body for retrieving a domain."""
+
+    domain_id: str = Field(description="Unique identifier for the domain")
+    schema_: DomainSchema = Field(alias="schema", description="Domain schema")
+    metadata: DomainMetadata = Field(description="Domain metadata including version and timestamps")
 
     model_config = {"populate_by_name": True}
 
@@ -190,4 +201,44 @@ async def create_domain(request: CreateDomainRequest) -> CreateDomainResponse:
         domain_id=domain_id,
         schema=schema,
         metadata=response_metadata,
+    )
+
+
+@router.get(
+    "/{domain_id}",
+    response_model=GetDomainResponse,
+    responses={
+        200: {"description": "Domain retrieved successfully"},
+        404: {"description": "Domain not found"},
+    },
+)
+async def get_domain(domain_id: str) -> GetDomainResponse:
+    """Retrieve a domain configuration by ID.
+
+    Args:
+        domain_id: Unique identifier for the domain.
+
+    Returns:
+        GetDomainResponse with domain schema and metadata.
+
+    Raises:
+        HTTPException: 404 if domain doesn't exist.
+    """
+    store = _get_store()
+
+    try:
+        stored = store.load(domain_id)
+    except DomainStoreError as e:
+        logger.warning("Domain not found: %s", domain_id)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Domain '{domain_id}' not found",
+        ) from e
+
+    logger.info("Retrieved domain %s (version %d)", domain_id, stored.metadata.version)
+
+    return GetDomainResponse(
+        domain_id=domain_id,
+        schema=stored.schema_,
+        metadata=stored.metadata,
     )
