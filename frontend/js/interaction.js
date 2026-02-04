@@ -37,6 +37,33 @@
     // Pan animation for centering on selection
     let panAnimation = null;  // {startX, startY, targetX, targetY, progress}
 
+    // Zoom and pan configuration
+    const MIN_ZOOM = 0.1;   // Macro view - full topology visible
+    const MAX_ZOOM = 5.0;   // Micro view - details readable
+    const ZOOM_SENSITIVITY = 0.001;  // Mouse wheel sensitivity
+    const ZOOM_ANIMATION_SPEED = 0.15;  // Smooth zoom animation speed
+    const PAN_FRICTION = 0.92;  // Momentum friction for smooth pan
+
+    // Zoom/pan state
+    let isDragging = false;
+    let wasDragging = false;  // Track if a drag gesture just ended (for click suppression)
+    let dragStartX = 0;
+    let dragStartY = 0;
+    let viewportStartOffsetX = 0;
+    let viewportStartOffsetY = 0;
+    let zoomAnimation = null;  // {startScale, targetScale, centerX, centerY, progress}
+    let panVelocityX = 0;
+    let panVelocityY = 0;
+    let lastDragX = 0;
+    let lastDragY = 0;
+
+    // Touch state for pinch zoom
+    let touchStartDist = 0;
+    let touchStartScale = 1;
+    let touchCenterX = 0;
+    let touchCenterY = 0;
+    let isTouchZooming = false;
+
     // =========================================================================
     // Initialization
     // =========================================================================
@@ -48,9 +75,20 @@
     function init(canvasElement) {
         canvas = canvasElement;
 
+        // Mouse events for hover/click
         canvas.addEventListener('mousemove', handleMouseMove);
         canvas.addEventListener('mouseleave', handleMouseLeave);
         canvas.addEventListener('click', handleClick);
+
+        // Mouse events for zoom and pan
+        canvas.addEventListener('wheel', handleWheel, { passive: false });
+        canvas.addEventListener('mousedown', handleMouseDown);
+        canvas.addEventListener('mouseup', handleMouseUp);
+
+        // Touch events for pinch zoom
+        canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+        canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+        canvas.addEventListener('touchend', handleTouchEnd);
     }
 
     /**
@@ -74,8 +112,35 @@
         mouseX = event.clientX - rect.left;
         mouseY = event.clientY - rect.top;
 
+        // Handle dragging for pan
+        if (isDragging) {
+            const deltaX = event.clientX - dragStartX;
+            const deltaY = event.clientY - dragStartY;
+
+            // Track velocity for momentum
+            panVelocityX = event.clientX - lastDragX;
+            panVelocityY = event.clientY - lastDragY;
+            lastDragX = event.clientX;
+            lastDragY = event.clientY;
+
+            if (typeof LoopEngineRenderer !== 'undefined') {
+                LoopEngineRenderer.setViewport({
+                    offsetX: viewportStartOffsetX + deltaX,
+                    offsetY: viewportStartOffsetY + deltaY
+                });
+            }
+            return;  // Don't update hover while dragging
+        }
+
         // Perform hit test against agents
         hoveredAgent = hitTestAgents(mouseX, mouseY);
+
+        // Update cursor based on what's under mouse
+        if (hoveredAgent) {
+            canvas.style.cursor = 'pointer';
+        } else {
+            canvas.style.cursor = 'grab';
+        }
     }
 
     /**
@@ -90,6 +155,12 @@
      * @param {MouseEvent} event - Mouse event
      */
     function handleClick(event) {
+        // Ignore clicks if we just finished a drag gesture
+        if (wasDragging) {
+            wasDragging = false;
+            return;
+        }
+
         const rect = canvas.getBoundingClientRect();
         const clickX = event.clientX - rect.left;
         const clickY = event.clientY - rect.top;
@@ -103,6 +174,278 @@
         } else {
             // Click on empty space - deselect
             deselectAgent();
+        }
+    }
+
+    // =========================================================================
+    // Zoom and Pan Event Handlers
+    // =========================================================================
+
+    /**
+     * Handle mouse wheel for zoom.
+     * @param {WheelEvent} event - Wheel event
+     */
+    function handleWheel(event) {
+        event.preventDefault();
+
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = event.clientX - rect.left;
+        const mouseY = event.clientY - rect.top;
+
+        // Calculate zoom factor
+        const delta = -event.deltaY * ZOOM_SENSITIVITY;
+        const viewport = typeof LoopEngineRenderer !== 'undefined'
+            ? LoopEngineRenderer.getViewport()
+            : { scale: 1, offsetX: 0, offsetY: 0 };
+
+        // Calculate new scale with limits
+        const currentScale = viewport.scale;
+        const targetScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, currentScale * (1 + delta)));
+
+        // Initiate smooth zoom animation centered on mouse
+        startZoomAnimation(currentScale, targetScale, mouseX, mouseY);
+    }
+
+    /**
+     * Start a smooth zoom animation.
+     * @param {number} startScale - Starting scale
+     * @param {number} targetScale - Target scale
+     * @param {number} centerX - Zoom center X (screen coords)
+     * @param {number} centerY - Zoom center Y (screen coords)
+     */
+    function startZoomAnimation(startScale, targetScale, centerX, centerY) {
+        zoomAnimation = {
+            startScale: startScale,
+            targetScale: targetScale,
+            centerX: centerX,
+            centerY: centerY,
+            progress: 0
+        };
+    }
+
+    /**
+     * Handle mouse down for pan start.
+     * @param {MouseEvent} event - Mouse event
+     */
+    function handleMouseDown(event) {
+        // Only pan with left button on empty space
+        if (event.button !== 0) return;
+
+        const rect = canvas.getBoundingClientRect();
+        const clickX = event.clientX - rect.left;
+        const clickY = event.clientY - rect.top;
+
+        // Check if clicking on an agent
+        const hitAgent = hitTestAgents(clickX, clickY);
+        if (hitAgent) {
+            // Don't start pan if clicking an agent
+            return;
+        }
+
+        isDragging = true;
+        dragStartX = event.clientX;
+        dragStartY = event.clientY;
+        lastDragX = event.clientX;
+        lastDragY = event.clientY;
+
+        const viewport = typeof LoopEngineRenderer !== 'undefined'
+            ? LoopEngineRenderer.getViewport()
+            : { scale: 1, offsetX: 0, offsetY: 0 };
+
+        viewportStartOffsetX = viewport.offsetX;
+        viewportStartOffsetY = viewport.offsetY;
+
+        // Reset velocity
+        panVelocityX = 0;
+        panVelocityY = 0;
+
+        // Change cursor
+        canvas.style.cursor = 'grabbing';
+    }
+
+    /**
+     * Handle mouse up for pan end.
+     * @param {MouseEvent} event - Mouse event
+     */
+    function handleMouseUp(event) {
+        if (isDragging) {
+            isDragging = false;
+
+            // Check if this was a significant drag vs a click
+            const dragDist = Math.sqrt(
+                Math.pow(event.clientX - dragStartX, 2) +
+                Math.pow(event.clientY - dragStartY, 2)
+            );
+
+            // If it was a significant drag, suppress the click event
+            if (dragDist >= 5) {
+                wasDragging = true;
+            }
+
+            // Restore cursor based on what's under mouse
+            const rect = canvas.getBoundingClientRect();
+            const mx = event.clientX - rect.left;
+            const my = event.clientY - rect.top;
+            const hitAgent = hitTestAgents(mx, my);
+            canvas.style.cursor = hitAgent ? 'pointer' : 'grab';
+        }
+    }
+
+    // =========================================================================
+    // Touch Event Handlers for Pinch Zoom
+    // =========================================================================
+
+    /**
+     * Get distance between two touch points.
+     * @param {Touch} touch1 - First touch
+     * @param {Touch} touch2 - Second touch
+     * @returns {number} Distance in pixels
+     */
+    function getTouchDistance(touch1, touch2) {
+        const dx = touch1.clientX - touch2.clientX;
+        const dy = touch1.clientY - touch2.clientY;
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    /**
+     * Get center point between two touches.
+     * @param {Touch} touch1 - First touch
+     * @param {Touch} touch2 - Second touch
+     * @param {DOMRect} rect - Canvas bounding rect
+     * @returns {Object} {x, y} center in canvas coords
+     */
+    function getTouchCenter(touch1, touch2, rect) {
+        return {
+            x: ((touch1.clientX + touch2.clientX) / 2) - rect.left,
+            y: ((touch1.clientY + touch2.clientY) / 2) - rect.top
+        };
+    }
+
+    /**
+     * Handle touch start for pinch zoom.
+     * @param {TouchEvent} event - Touch event
+     */
+    function handleTouchStart(event) {
+        if (event.touches.length === 2) {
+            event.preventDefault();
+            isTouchZooming = true;
+
+            touchStartDist = getTouchDistance(event.touches[0], event.touches[1]);
+
+            const viewport = typeof LoopEngineRenderer !== 'undefined'
+                ? LoopEngineRenderer.getViewport()
+                : { scale: 1, offsetX: 0, offsetY: 0 };
+
+            touchStartScale = viewport.scale;
+
+            const rect = canvas.getBoundingClientRect();
+            const center = getTouchCenter(event.touches[0], event.touches[1], rect);
+            touchCenterX = center.x;
+            touchCenterY = center.y;
+        } else if (event.touches.length === 1) {
+            // Single touch - start pan
+            const rect = canvas.getBoundingClientRect();
+            const touchX = event.touches[0].clientX - rect.left;
+            const touchY = event.touches[0].clientY - rect.top;
+
+            const hitAgent = hitTestAgents(touchX, touchY);
+            if (!hitAgent) {
+                isDragging = true;
+                dragStartX = event.touches[0].clientX;
+                dragStartY = event.touches[0].clientY;
+                lastDragX = event.touches[0].clientX;
+                lastDragY = event.touches[0].clientY;
+
+                const viewport = typeof LoopEngineRenderer !== 'undefined'
+                    ? LoopEngineRenderer.getViewport()
+                    : { scale: 1, offsetX: 0, offsetY: 0 };
+
+                viewportStartOffsetX = viewport.offsetX;
+                viewportStartOffsetY = viewport.offsetY;
+                panVelocityX = 0;
+                panVelocityY = 0;
+            }
+        }
+    }
+
+    /**
+     * Handle touch move for pinch zoom and pan.
+     * @param {TouchEvent} event - Touch event
+     */
+    function handleTouchMove(event) {
+        if (event.touches.length === 2 && isTouchZooming) {
+            event.preventDefault();
+
+            const currentDist = getTouchDistance(event.touches[0], event.touches[1]);
+            const scaleRatio = currentDist / touchStartDist;
+            const newScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, touchStartScale * scaleRatio));
+
+            // Apply zoom centered on pinch center
+            applyZoomAtPoint(newScale, touchCenterX, touchCenterY);
+
+        } else if (event.touches.length === 1 && isDragging && !isTouchZooming) {
+            event.preventDefault();
+
+            const touch = event.touches[0];
+            const deltaX = touch.clientX - dragStartX;
+            const deltaY = touch.clientY - dragStartY;
+
+            // Track velocity for momentum
+            panVelocityX = touch.clientX - lastDragX;
+            panVelocityY = touch.clientY - lastDragY;
+            lastDragX = touch.clientX;
+            lastDragY = touch.clientY;
+
+            if (typeof LoopEngineRenderer !== 'undefined') {
+                LoopEngineRenderer.setViewport({
+                    offsetX: viewportStartOffsetX + deltaX,
+                    offsetY: viewportStartOffsetY + deltaY
+                });
+            }
+        }
+    }
+
+    /**
+     * Handle touch end.
+     * @param {TouchEvent} event - Touch event
+     */
+    function handleTouchEnd(event) {
+        if (event.touches.length < 2) {
+            isTouchZooming = false;
+        }
+        if (event.touches.length === 0) {
+            isDragging = false;
+        }
+    }
+
+    /**
+     * Apply zoom at a specific point (for immediate zoom without animation).
+     * @param {number} newScale - New scale value
+     * @param {number} centerX - Zoom center X (screen coords)
+     * @param {number} centerY - Zoom center Y (screen coords)
+     */
+    function applyZoomAtPoint(newScale, centerX, centerY) {
+        const viewport = typeof LoopEngineRenderer !== 'undefined'
+            ? LoopEngineRenderer.getViewport()
+            : { scale: 1, offsetX: 0, offsetY: 0 };
+
+        const oldScale = viewport.scale;
+        if (newScale === oldScale) return;
+
+        // Calculate world position under cursor before zoom
+        const worldX = (centerX - viewport.offsetX) / oldScale;
+        const worldY = (centerY - viewport.offsetY) / oldScale;
+
+        // Calculate new offset to keep world position under cursor
+        const newOffsetX = centerX - worldX * newScale;
+        const newOffsetY = centerY - worldY * newScale;
+
+        if (typeof LoopEngineRenderer !== 'undefined') {
+            LoopEngineRenderer.setViewport({
+                scale: newScale,
+                offsetX: newOffsetX,
+                offsetY: newOffsetY
+            });
         }
     }
 
@@ -156,7 +499,7 @@
             panelSlideProgress = Math.max(0, panelSlideProgress - PANEL_SLIDE_SPEED);
         }
 
-        // Update pan animation
+        // Update pan animation (for centering on selected agent)
         if (panAnimation && panAnimation.progress < 1) {
             panAnimation.progress = Math.min(1, panAnimation.progress + 0.05);
 
@@ -176,6 +519,43 @@
             if (panAnimation.progress >= 1) {
                 panAnimation = null;
             }
+        }
+
+        // Update zoom animation
+        if (zoomAnimation && zoomAnimation.progress < 1) {
+            zoomAnimation.progress = Math.min(1, zoomAnimation.progress + ZOOM_ANIMATION_SPEED);
+
+            const t = easeOutCubic(zoomAnimation.progress);
+            const newScale = lerp(zoomAnimation.startScale, zoomAnimation.targetScale, t);
+
+            // Apply zoom centered on the animation center point
+            applyZoomAtPoint(newScale, zoomAnimation.centerX, zoomAnimation.centerY);
+
+            if (zoomAnimation.progress >= 1) {
+                zoomAnimation = null;
+            }
+        }
+
+        // Apply pan momentum (when not dragging)
+        if (!isDragging && (Math.abs(panVelocityX) > 0.1 || Math.abs(panVelocityY) > 0.1)) {
+            const viewport = typeof LoopEngineRenderer !== 'undefined'
+                ? LoopEngineRenderer.getViewport()
+                : { scale: 1, offsetX: 0, offsetY: 0 };
+
+            if (typeof LoopEngineRenderer !== 'undefined') {
+                LoopEngineRenderer.setViewport({
+                    offsetX: viewport.offsetX + panVelocityX,
+                    offsetY: viewport.offsetY + panVelocityY
+                });
+            }
+
+            // Apply friction
+            panVelocityX *= PAN_FRICTION;
+            panVelocityY *= PAN_FRICTION;
+
+            // Stop if velocity is very small
+            if (Math.abs(panVelocityX) < 0.1) panVelocityX = 0;
+            if (Math.abs(panVelocityY) < 0.1) panVelocityY = 0;
         }
     }
 
@@ -747,6 +1127,59 @@
     // Module Export
     // =========================================================================
 
+    /**
+     * Zoom to fit all content in view (macro view).
+     */
+    function zoomToFit() {
+        if (!currentFrame || !currentFrame.agents || currentFrame.agents.length === 0) return;
+
+        const canvasWidth = canvas._logicalWidth || canvas.width;
+        const canvasHeight = canvas._logicalHeight || canvas.height;
+
+        if (typeof LoopEngineRenderer !== 'undefined') {
+            LoopEngineRenderer.autoCenterViewport(currentFrame.agents, canvasWidth, canvasHeight);
+        }
+    }
+
+    /**
+     * Get current zoom level.
+     * @returns {number} Current scale
+     */
+    function getZoomLevel() {
+        const viewport = typeof LoopEngineRenderer !== 'undefined'
+            ? LoopEngineRenderer.getViewport()
+            : { scale: 1 };
+        return viewport.scale;
+    }
+
+    /**
+     * Set zoom level programmatically.
+     * @param {number} scale - New scale (clamped to MIN_ZOOM/MAX_ZOOM)
+     * @param {boolean} animate - Whether to animate the transition
+     */
+    function setZoomLevel(scale, animate) {
+        const clampedScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, scale));
+        const canvasWidth = canvas._logicalWidth || canvas.width;
+        const canvasHeight = canvas._logicalHeight || canvas.height;
+
+        if (animate) {
+            const viewport = typeof LoopEngineRenderer !== 'undefined'
+                ? LoopEngineRenderer.getViewport()
+                : { scale: 1 };
+            startZoomAnimation(viewport.scale, clampedScale, canvasWidth / 2, canvasHeight / 2);
+        } else {
+            applyZoomAtPoint(clampedScale, canvasWidth / 2, canvasHeight / 2);
+        }
+    }
+
+    /**
+     * Check if currently dragging (panning).
+     * @returns {boolean} True if dragging
+     */
+    function isDraggingViewport() {
+        return isDragging;
+    }
+
     global.LoopEngineInteraction = {
         init: init,
         setFrame: setFrame,
@@ -760,7 +1193,15 @@
         selectAgent: selectAgent,
         deselectAgent: deselectAgent,
         hitTestAgents: hitTestAgents,
-        updateAnimations: updateAnimations
+        updateAnimations: updateAnimations,
+        // Zoom and pan controls
+        zoomToFit: zoomToFit,
+        getZoomLevel: getZoomLevel,
+        setZoomLevel: setZoomLevel,
+        isDraggingViewport: isDraggingViewport,
+        // Zoom constants for external reference
+        MIN_ZOOM: MIN_ZOOM,
+        MAX_ZOOM: MAX_ZOOM
     };
 
 })(typeof window !== 'undefined' ? window : this);
