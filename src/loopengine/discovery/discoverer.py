@@ -61,39 +61,91 @@ class DiscoveryResult:
     discovered_at: datetime = field(default_factory=datetime.now)
 
 
-# Discovery prompt template based on PRD Appendix B
-DISCOVERY_PROMPT_TEMPLATE = """You are analyzing an organizational system to discover the meaningful
-dimensions of variation for agents in each role.
+# Valid trait categories
+VALID_CATEGORIES = frozenset(["physical", "cognitive", "social", "temperamental", "skill"])
 
-SYSTEM DESCRIPTION:
+# Discovery prompt template based on PRD Appendix B
+# This template is designed to produce consistent, role-appropriate genome schemas
+# for simulation agents. Key design decisions:
+# - Explicit category definitions with examples for consistent classification
+# - Flexibility score guidance based on input predictability
+# - Emphasis on role-specific traits (not generic personality traits)
+# - Trait relevance to the role's actual responsibilities
+DISCOVERY_PROMPT_TEMPLATE = """You are analyzing an organizational system to discover the meaningful
+dimensions of variation for agents in each role. Your task is to identify traits that would
+meaningfully affect an agent's performance in their specific role.
+
+## SYSTEM DESCRIPTION
 {system_description_json}
 
-For each role in this system, identify the traits that would meaningfully
-affect an agent's performance. Consider:
-- What cognitive, physical, social, and temperamental traits matter?
-- What skills or aptitudes differentiate good from poor performance?
-- What tendencies or biases affect decision-making in this role?
-- What traits affect how this agent interacts with linked agents?
+## INSTRUCTIONS
 
-For each trait, provide:
-- name: a snake_case identifier
-- description: what this trait represents
-- category: one of "physical", "cognitive", "social", "temperamental", "skill"
-- min_val: minimum value (typically 0.0)
-- max_val: maximum value (typically 1.0)
+Analyze each role in the system and identify 3-6 traits per role that would meaningfully
+affect performance. Traits should be:
 
-Also provide a flexibility_score (0.0 to 1.0) for each role indicating
-how much input variance the role typically faces.
+1. **Role-specific**: Directly relevant to what this role does (not generic personality traits)
+2. **Measurable**: Can vary on a 0.0-1.0 scale where higher is typically better (but not always)
+3. **Impactful**: Would actually affect outcomes in the simulation
+4. **Distinctive**: Different roles should have different trait profiles
 
-Respond with valid JSON only, no additional commentary. Use this exact structure:
+## TRAIT CATEGORIES
+
+Use ONLY these categories with the following meanings:
+
+- **physical**: Traits related to speed, endurance, dexterity, stamina
+  Examples: speed, endurance, dexterity, reaction_time
+
+- **cognitive**: Traits related to thinking, planning, analysis, memory, learning
+  Examples: analytical_ability, pattern_recognition, forecasting, attention_to_detail
+
+- **social**: Traits related to interaction with others, communication, influence
+  Examples: rapport_building, persuasion, conflict_resolution, empathy
+
+- **temperamental**: Traits related to emotional regulation, stress response, disposition
+  Examples: stress_tolerance, patience, adaptability, composure
+
+- **skill**: Learned abilities specific to the role's domain
+  Examples: technical_expertise, domain_knowledge, process_efficiency
+
+## FLEXIBILITY SCORE
+
+Assign a flexibility_score (0.0-1.0) based on how much input variance the role faces:
+
+- **Low (0.1-0.3)**: Role has predictable, routine inputs. Same tasks day after day.
+  Example: Assembly line worker, data entry clerk
+
+- **Medium (0.4-0.6)**: Role has some variety but within expected patterns.
+  Example: Cashier, sandwich maker (orders vary but ingredients/process known)
+
+- **High (0.7-0.9)**: Role must handle unpredictable situations regularly.
+  Example: Manager (unexpected problems), customer service (complaints), emergency responder
+
+## TRAIT DESIGN GUIDELINES
+
+For each role, consider:
+- What inputs does this role receive? (from the role's inputs list)
+- What outputs must this role produce? (from the role's outputs list)
+- What constraints must this role operate within? (from the role's constraints)
+- What links does this role have? (hierarchical = leadership traits, service = coordination)
+
+Match traits to responsibilities:
+- Roles handling customer interactions → social traits
+- Roles doing physical work → physical and skill traits
+- Roles making decisions → cognitive and temperamental traits
+- Roles under time pressure → physical speed and temperamental stress tolerance
+
+## OUTPUT FORMAT
+
+Respond with ONLY valid JSON in this exact structure (no markdown, no commentary):
+
 {{
     "roles": {{
         "role_name": {{
             "traits": [
                 {{
-                    "name": "trait_name",
-                    "description": "what this trait represents",
-                    "category": "cognitive",
+                    "name": "trait_name_in_snake_case",
+                    "description": "Clear description of what this trait represents",
+                    "category": "one of: physical, cognitive, social, temperamental, skill",
                     "min_val": 0.0,
                     "max_val": 1.0
                 }}
@@ -101,7 +153,9 @@ Respond with valid JSON only, no additional commentary. Use this exact structure
             "flexibility_score": 0.5
         }}
     }}
-}}"""
+}}
+
+Generate traits for ALL roles found in the system description."""
 
 
 class Discoverer:
@@ -234,12 +288,26 @@ class Discoverer:
         for role_name, role_data in data["roles"].items():
             traits = {}
             for trait_data in role_data.get("traits", []):
+                # Validate and normalize category
+                raw_category = trait_data.get("category", "").lower().strip()
+                category = raw_category if raw_category in VALID_CATEGORIES else "skill"
+                if raw_category and raw_category not in VALID_CATEGORIES:
+                    logger.warning(
+                        "Unknown category '%s' for trait '%s', defaulting to 'skill'",
+                        raw_category,
+                        trait_data.get("name", "unknown"),
+                    )
+
+                # Normalize trait name to snake_case
+                raw_name = trait_data.get("name", "")
+                name = raw_name.lower().replace(" ", "_").replace("-", "_")
+
                 trait = GenomeTrait(
-                    name=trait_data.get("name", ""),
+                    name=name,
                     description=trait_data.get("description", ""),
                     min_val=float(trait_data.get("min_val", 0.0)),
                     max_val=float(trait_data.get("max_val", 1.0)),
-                    category=trait_data.get("category", ""),
+                    category=category,
                     discovered_at=discovered_at,
                 )
                 traits[trait.name] = trait
@@ -252,7 +320,17 @@ class Discoverer:
                 version=1,
             )
 
-            flexibility = float(role_data.get("flexibility_score", 0.5))
+            # Validate and clamp flexibility score to 0.0-1.0
+            raw_flexibility = float(role_data.get("flexibility_score", 0.5))
+            flexibility = max(0.0, min(1.0, raw_flexibility))
+            if raw_flexibility != flexibility:
+                logger.warning(
+                    "Flexibility score %s for role '%s' clamped to %s",
+                    raw_flexibility,
+                    role_name,
+                    flexibility,
+                )
+
             result.roles[role_name] = DiscoveredRole(
                 schema=schema,
                 flexibility_score=flexibility,

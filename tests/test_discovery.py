@@ -486,10 +486,11 @@ class TestResponseParsing:
             schemas = discoverer.discover_schemas(sample_system_description)
 
             # Should use defaults for missing fields
+            # Empty/missing category defaults to "skill"
             trait = schemas["owner"].traits["leadership"]
             assert trait.min_val == 0.0
             assert trait.max_val == 1.0
-            assert trait.category == ""
+            assert trait.category == "skill"  # Empty category defaults to "skill"
 
 
 class TestConvenienceFunction:
@@ -633,3 +634,555 @@ class TestPromptConstruction:
 
             # Should use low temperature for structured output
             assert temperature <= 0.5
+
+    def test_prompt_includes_category_definitions(
+        self,
+        mock_config: LLMConfig,
+        sample_system_description: dict,
+        mock_anthropic_response: MagicMock,
+    ) -> None:
+        """Test the prompt includes explicit category definitions."""
+        with patch("loopengine.discovery.discoverer.anthropic.Anthropic") as mock_anthropic:
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = mock_anthropic_response
+            mock_anthropic.return_value = mock_client
+
+            discoverer = Discoverer(config=mock_config)
+            discoverer.discover_schemas(sample_system_description)
+
+            call_args = mock_client.messages.create.call_args
+            messages = call_args.kwargs["messages"]
+            prompt_content = messages[0]["content"]
+
+            # Verify all categories are defined
+            assert "physical" in prompt_content.lower()
+            assert "cognitive" in prompt_content.lower()
+            assert "social" in prompt_content.lower()
+            assert "temperamental" in prompt_content.lower()
+            assert "skill" in prompt_content.lower()
+
+    def test_prompt_includes_flexibility_guidance(
+        self,
+        mock_config: LLMConfig,
+        sample_system_description: dict,
+        mock_anthropic_response: MagicMock,
+    ) -> None:
+        """Test the prompt includes flexibility score guidance."""
+        with patch("loopengine.discovery.discoverer.anthropic.Anthropic") as mock_anthropic:
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = mock_anthropic_response
+            mock_anthropic.return_value = mock_client
+
+            discoverer = Discoverer(config=mock_config)
+            discoverer.discover_schemas(sample_system_description)
+
+            call_args = mock_client.messages.create.call_args
+            messages = call_args.kwargs["messages"]
+            prompt_content = messages[0]["content"]
+
+            # Verify flexibility guidance is in the prompt
+            assert "flexibility_score" in prompt_content
+            assert "0.0" in prompt_content or "0.1" in prompt_content
+            assert "1.0" in prompt_content or "0.9" in prompt_content
+
+
+class TestPromptTemplateDesign:
+    """Tests for prompt template design and structure."""
+
+    def test_prompt_template_contains_role_specific_guidance(self) -> None:
+        """Test that prompt template guides toward role-specific traits."""
+        from loopengine.discovery.discoverer import DISCOVERY_PROMPT_TEMPLATE
+
+        prompt = DISCOVERY_PROMPT_TEMPLATE.lower()
+        assert "role-specific" in prompt or "role specific" in prompt
+        assert "inputs" in prompt
+        assert "outputs" in prompt
+        assert "links" in prompt
+
+    def test_prompt_template_contains_json_format(self) -> None:
+        """Test that prompt template specifies JSON output format."""
+        from loopengine.discovery.discoverer import DISCOVERY_PROMPT_TEMPLATE
+
+        # Should contain JSON structure example
+        assert '"roles"' in DISCOVERY_PROMPT_TEMPLATE
+        assert '"traits"' in DISCOVERY_PROMPT_TEMPLATE
+        assert '"name"' in DISCOVERY_PROMPT_TEMPLATE
+        assert '"description"' in DISCOVERY_PROMPT_TEMPLATE
+        assert '"category"' in DISCOVERY_PROMPT_TEMPLATE
+
+    def test_prompt_template_contains_valid_categories(self) -> None:
+        """Test that prompt template lists valid categories."""
+        from loopengine.discovery.discoverer import (
+            DISCOVERY_PROMPT_TEMPLATE,
+            VALID_CATEGORIES,
+        )
+
+        for category in VALID_CATEGORIES:
+            assert category in DISCOVERY_PROMPT_TEMPLATE.lower()
+
+
+class TestCategoryValidation:
+    """Tests for category validation in parsing."""
+
+    def test_valid_categories_constant(self) -> None:
+        """Test VALID_CATEGORIES contains expected values."""
+        from loopengine.discovery.discoverer import VALID_CATEGORIES
+
+        assert "physical" in VALID_CATEGORIES
+        assert "cognitive" in VALID_CATEGORIES
+        assert "social" in VALID_CATEGORIES
+        assert "temperamental" in VALID_CATEGORIES
+        assert "skill" in VALID_CATEGORIES
+        assert len(VALID_CATEGORIES) == 5
+
+    def test_import_valid_categories_from_package(self) -> None:
+        """Test VALID_CATEGORIES can be imported from discovery package."""
+        from loopengine.discovery import VALID_CATEGORIES
+
+        assert isinstance(VALID_CATEGORIES, frozenset)
+        assert len(VALID_CATEGORIES) == 5
+
+    def test_invalid_category_defaults_to_skill(
+        self,
+        mock_config: LLMConfig,
+        sample_system_description: dict,
+    ) -> None:
+        """Test that invalid categories default to 'skill'."""
+        invalid_response = json.dumps(
+            {
+                "roles": {
+                    "owner": {
+                        "traits": [
+                            {
+                                "name": "leadership",
+                                "description": "Leadership ability",
+                                "category": "invalid_category",
+                                "min_val": 0.0,
+                                "max_val": 1.0,
+                            }
+                        ],
+                        "flexibility_score": 0.5,
+                    }
+                }
+            }
+        )
+        response = MagicMock()
+        response.content = [MagicMock(type="text", text=invalid_response)]
+
+        with patch("loopengine.discovery.discoverer.anthropic.Anthropic") as mock_anthropic:
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = response
+            mock_anthropic.return_value = mock_client
+
+            discoverer = Discoverer(config=mock_config)
+            schemas = discoverer.discover_schemas(sample_system_description)
+
+            # Invalid category should default to skill
+            trait = schemas["owner"].traits["leadership"]
+            assert trait.category == "skill"
+
+    def test_category_case_normalization(
+        self,
+        mock_config: LLMConfig,
+        sample_system_description: dict,
+    ) -> None:
+        """Test that category names are normalized to lowercase."""
+        mixed_case_response = json.dumps(
+            {
+                "roles": {
+                    "owner": {
+                        "traits": [
+                            {
+                                "name": "planning",
+                                "description": "Planning ability",
+                                "category": "COGNITIVE",
+                                "min_val": 0.0,
+                                "max_val": 1.0,
+                            },
+                            {
+                                "name": "endurance",
+                                "description": "Physical endurance",
+                                "category": "Physical",
+                                "min_val": 0.0,
+                                "max_val": 1.0,
+                            },
+                        ],
+                        "flexibility_score": 0.5,
+                    }
+                }
+            }
+        )
+        response = MagicMock()
+        response.content = [MagicMock(type="text", text=mixed_case_response)]
+
+        with patch("loopengine.discovery.discoverer.anthropic.Anthropic") as mock_anthropic:
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = response
+            mock_anthropic.return_value = mock_client
+
+            discoverer = Discoverer(config=mock_config)
+            schemas = discoverer.discover_schemas(sample_system_description)
+
+            assert schemas["owner"].traits["planning"].category == "cognitive"
+            assert schemas["owner"].traits["endurance"].category == "physical"
+
+
+class TestTraitNameNormalization:
+    """Tests for trait name normalization."""
+
+    def test_trait_name_normalized_to_snake_case(
+        self,
+        mock_config: LLMConfig,
+        sample_system_description: dict,
+    ) -> None:
+        """Test that trait names are normalized to snake_case."""
+        response_with_spaces = json.dumps(
+            {
+                "roles": {
+                    "owner": {
+                        "traits": [
+                            {
+                                "name": "Problem Solving",
+                                "description": "Problem solving ability",
+                                "category": "cognitive",
+                            },
+                            {
+                                "name": "stress-tolerance",
+                                "description": "Stress tolerance",
+                                "category": "temperamental",
+                            },
+                        ],
+                        "flexibility_score": 0.5,
+                    }
+                }
+            }
+        )
+        response = MagicMock()
+        response.content = [MagicMock(type="text", text=response_with_spaces)]
+
+        with patch("loopengine.discovery.discoverer.anthropic.Anthropic") as mock_anthropic:
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = response
+            mock_anthropic.return_value = mock_client
+
+            discoverer = Discoverer(config=mock_config)
+            schemas = discoverer.discover_schemas(sample_system_description)
+
+            # Names should be normalized
+            assert "problem_solving" in schemas["owner"].traits
+            assert "stress_tolerance" in schemas["owner"].traits
+
+
+class TestFlexibilityScoreValidation:
+    """Tests for flexibility score validation."""
+
+    def test_flexibility_score_clamped_to_valid_range(
+        self,
+        mock_config: LLMConfig,
+        sample_system_description: dict,
+    ) -> None:
+        """Test that flexibility scores outside 0-1 are clamped."""
+        response_with_invalid_flexibility = json.dumps(
+            {
+                "roles": {
+                    "role_low": {
+                        "traits": [
+                            {"name": "trait1", "description": "Trait 1", "category": "skill"}
+                        ],
+                        "flexibility_score": -0.5,
+                    },
+                    "role_high": {
+                        "traits": [
+                            {"name": "trait2", "description": "Trait 2", "category": "skill"}
+                        ],
+                        "flexibility_score": 1.5,
+                    },
+                    "role_valid": {
+                        "traits": [
+                            {"name": "trait3", "description": "Trait 3", "category": "skill"}
+                        ],
+                        "flexibility_score": 0.7,
+                    },
+                }
+            }
+        )
+        response = MagicMock()
+        response.content = [MagicMock(type="text", text=response_with_invalid_flexibility)]
+
+        with patch("loopengine.discovery.discoverer.anthropic.Anthropic") as mock_anthropic:
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = response
+            mock_anthropic.return_value = mock_client
+
+            discoverer = Discoverer(config=mock_config)
+            result = discoverer.discover(sample_system_description)
+
+            # Scores should be clamped
+            assert result.roles["role_low"].flexibility_score == 0.0
+            assert result.roles["role_high"].flexibility_score == 1.0
+            assert result.roles["role_valid"].flexibility_score == 0.7
+
+
+class TestVariousSystemDescriptions:
+    """Tests for handling various system descriptions."""
+
+    @pytest.fixture
+    def software_team_description(self) -> dict:
+        """Create a software team system description."""
+        return {
+            "system": "Software development team with 4 members",
+            "roles": [
+                {
+                    "name": "product_manager",
+                    "inputs": ["feature_requests", "bug_reports", "stakeholder_feedback"],
+                    "outputs": ["prioritized_backlog", "requirements", "decisions"],
+                    "constraints": ["timeline", "budget", "scope"],
+                    "links_to": ["developer (hierarchical)", "designer (hierarchical)"],
+                },
+                {
+                    "name": "developer",
+                    "inputs": ["requirements", "code_reviews", "bug_tickets"],
+                    "outputs": ["code", "pull_requests", "documentation"],
+                    "constraints": ["coding_standards", "security_guidelines"],
+                    "links_to": [
+                        "product_manager (hierarchical)",
+                        "developer (peer)",
+                        "designer (service)",
+                    ],
+                },
+                {
+                    "name": "designer",
+                    "inputs": ["requirements", "user_research", "feedback"],
+                    "outputs": ["designs", "prototypes", "style_guides"],
+                    "constraints": ["brand_guidelines", "accessibility"],
+                    "links_to": ["product_manager (hierarchical)", "developer (service)"],
+                },
+            ],
+        }
+
+    @pytest.fixture
+    def mock_software_team_response(self) -> str:
+        """Create a mock discovery response for software team."""
+        return json.dumps(
+            {
+                "roles": {
+                    "product_manager": {
+                        "traits": [
+                            {
+                                "name": "prioritization",
+                                "description": "Ability to prioritize tasks effectively",
+                                "category": "cognitive",
+                                "min_val": 0.0,
+                                "max_val": 1.0,
+                            },
+                            {
+                                "name": "stakeholder_communication",
+                                "description": "Communication with stakeholders",
+                                "category": "social",
+                                "min_val": 0.0,
+                                "max_val": 1.0,
+                            },
+                        ],
+                        "flexibility_score": 0.7,
+                    },
+                    "developer": {
+                        "traits": [
+                            {
+                                "name": "coding_speed",
+                                "description": "Speed of writing code",
+                                "category": "skill",
+                                "min_val": 0.0,
+                                "max_val": 1.0,
+                            },
+                            {
+                                "name": "debugging",
+                                "description": "Debugging ability",
+                                "category": "cognitive",
+                                "min_val": 0.0,
+                                "max_val": 1.0,
+                            },
+                        ],
+                        "flexibility_score": 0.5,
+                    },
+                    "designer": {
+                        "traits": [
+                            {
+                                "name": "creativity",
+                                "description": "Creative design ability",
+                                "category": "cognitive",
+                                "min_val": 0.0,
+                                "max_val": 1.0,
+                            },
+                            {
+                                "name": "user_empathy",
+                                "description": "Understanding of user needs",
+                                "category": "social",
+                                "min_val": 0.0,
+                                "max_val": 1.0,
+                            },
+                        ],
+                        "flexibility_score": 0.6,
+                    },
+                }
+            }
+        )
+
+    def test_discovery_with_different_system_description(
+        self,
+        mock_config: LLMConfig,
+        software_team_description: dict,
+        mock_software_team_response: str,
+    ) -> None:
+        """Test discovery works with different system descriptions."""
+        response = MagicMock()
+        response.content = [MagicMock(type="text", text=mock_software_team_response)]
+
+        with patch("loopengine.discovery.discoverer.anthropic.Anthropic") as mock_anthropic:
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = response
+            mock_anthropic.return_value = mock_client
+
+            discoverer = Discoverer(config=mock_config)
+            schemas = discoverer.discover_schemas(software_team_description)
+
+            assert len(schemas) == 3
+            assert "product_manager" in schemas
+            assert "developer" in schemas
+            assert "designer" in schemas
+
+    def test_prompt_includes_software_team_roles(
+        self,
+        mock_config: LLMConfig,
+        software_team_description: dict,
+        mock_software_team_response: str,
+    ) -> None:
+        """Test prompt includes software team role information."""
+        response = MagicMock()
+        response.content = [MagicMock(type="text", text=mock_software_team_response)]
+
+        with patch("loopengine.discovery.discoverer.anthropic.Anthropic") as mock_anthropic:
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = response
+            mock_anthropic.return_value = mock_client
+
+            discoverer = Discoverer(config=mock_config)
+            discoverer.discover_schemas(software_team_description)
+
+            call_args = mock_client.messages.create.call_args
+            messages = call_args.kwargs["messages"]
+            prompt_content = messages[0]["content"]
+
+            assert "product_manager" in prompt_content
+            assert "developer" in prompt_content
+            assert "designer" in prompt_content
+            assert "feature_requests" in prompt_content
+
+    def test_flexibility_appropriate_for_role(
+        self,
+        mock_config: LLMConfig,
+        software_team_description: dict,
+        mock_software_team_response: str,
+    ) -> None:
+        """Test flexibility scores are appropriate for roles."""
+        response = MagicMock()
+        response.content = [MagicMock(type="text", text=mock_software_team_response)]
+
+        with patch("loopengine.discovery.discoverer.anthropic.Anthropic") as mock_anthropic:
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = response
+            mock_anthropic.return_value = mock_client
+
+            discoverer = Discoverer(config=mock_config)
+            result = discoverer.discover(software_team_description)
+
+            # PM deals with more unpredictable inputs than developer
+            assert (
+                result.roles["product_manager"].flexibility_score
+                >= result.roles["developer"].flexibility_score
+            )
+
+
+class TestRoleAppropriateTraits:
+    """Tests for role-appropriate trait discovery."""
+
+    def test_sandwich_maker_gets_physical_traits(
+        self,
+        mock_config: LLMConfig,
+        sample_system_description: dict,
+        mock_anthropic_response: MagicMock,
+    ) -> None:
+        """Test sandwich maker role gets physical traits like speed."""
+        with patch("loopengine.discovery.discoverer.anthropic.Anthropic") as mock_anthropic:
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = mock_anthropic_response
+            mock_anthropic.return_value = mock_client
+
+            discoverer = Discoverer(config=mock_config)
+            schemas = discoverer.discover_schemas(sample_system_description)
+
+            # Sandwich maker should have physical trait
+            maker_traits = schemas["sandwich_maker"].traits
+            categories = [t.category for t in maker_traits.values()]
+            assert "physical" in categories or "skill" in categories
+
+    def test_cashier_gets_social_traits(
+        self,
+        mock_config: LLMConfig,
+        sample_system_description: dict,
+        mock_anthropic_response: MagicMock,
+    ) -> None:
+        """Test cashier role gets social traits for customer interaction."""
+        with patch("loopengine.discovery.discoverer.anthropic.Anthropic") as mock_anthropic:
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = mock_anthropic_response
+            mock_anthropic.return_value = mock_client
+
+            discoverer = Discoverer(config=mock_config)
+            schemas = discoverer.discover_schemas(sample_system_description)
+
+            # Cashier should have social trait
+            cashier_traits = schemas["cashier"].traits
+            categories = [t.category for t in cashier_traits.values()]
+            assert "social" in categories
+
+    def test_owner_gets_cognitive_traits(
+        self,
+        mock_config: LLMConfig,
+        sample_system_description: dict,
+        mock_anthropic_response: MagicMock,
+    ) -> None:
+        """Test owner role gets cognitive traits for decision making."""
+        with patch("loopengine.discovery.discoverer.anthropic.Anthropic") as mock_anthropic:
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = mock_anthropic_response
+            mock_anthropic.return_value = mock_client
+
+            discoverer = Discoverer(config=mock_config)
+            schemas = discoverer.discover_schemas(sample_system_description)
+
+            # Owner should have cognitive traits for management
+            owner_traits = schemas["owner"].traits
+            categories = [t.category for t in owner_traits.values()]
+            assert "cognitive" in categories or "social" in categories
+
+    def test_flexibility_sandwich_maker_less_than_owner(
+        self,
+        mock_config: LLMConfig,
+        sample_system_description: dict,
+        mock_anthropic_response: MagicMock,
+    ) -> None:
+        """Test sandwich maker has lower flexibility than owner (more predictable work)."""
+        with patch("loopengine.discovery.discoverer.anthropic.Anthropic") as mock_anthropic:
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = mock_anthropic_response
+            mock_anthropic.return_value = mock_client
+
+            discoverer = Discoverer(config=mock_config)
+            result = discoverer.discover(sample_system_description)
+
+            # Sandwich maker should have lower flexibility than owner
+            # (sandwich making is more routine than managing)
+            assert (
+                result.roles["sandwich_maker"].flexibility_score
+                <= result.roles["owner"].flexibility_score
+            )

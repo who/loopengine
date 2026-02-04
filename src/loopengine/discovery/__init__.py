@@ -1,6 +1,7 @@
 """AI genome discovery via LLM-based schema inference."""
 
 from loopengine.discovery.discoverer import (
+    VALID_CATEGORIES,
     DiscoveredRole,
     Discoverer,
     DiscoveryError,
@@ -9,6 +10,7 @@ from loopengine.discovery.discoverer import (
 )
 
 __all__ = [
+    "VALID_CATEGORIES",
     "DiscoveredRole",
     "Discoverer",
     "DiscoveryError",
