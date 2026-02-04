@@ -47,6 +47,11 @@
         window.addEventListener('resize', handleResize);
         handleResize();
 
+        // Initialize interaction module for hover/click handling
+        if (typeof LoopEngineInteraction !== 'undefined') {
+            LoopEngineInteraction.init(canvas);
+        }
+
         // Connect to WebSockets
         connectFramesSocket();
         connectControlSocket();

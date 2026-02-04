@@ -314,14 +314,20 @@
         const offsetX = viewport ? viewport.offsetX : 0;
         const offsetY = viewport ? viewport.offsetY : 0;
 
+        // Get hover state from interaction module
+        let hoverState = { glowBoost: 0, scaleBoost: 1.0, isHovered: false };
+        if (typeof LoopEngineInteraction !== 'undefined') {
+            hoverState = LoopEngineInteraction.getAgentHoverState(agent);
+        }
+
         // Transform coordinates to screen space
         const screenX = agent.x * scale + offsetX;
         const screenY = agent.y * scale + offsetY;
 
-        // Calculate breathing radius
+        // Calculate breathing radius with hover scale boost
         const baseRadius = agent.radius || 20;
         const breathingRadius = calculateBreathingRadius(baseRadius, agent.breathing_phase || 0);
-        const scaledRadius = breathingRadius * scale;
+        const scaledRadius = breathingRadius * scale * hoverState.scaleBoost;
 
         // Skip if too small to see
         if (scaledRadius < 1) return;
@@ -329,8 +335,11 @@
         // Get role color
         const color = agent.color || getRoleColor(agent.role);
 
+        // Calculate glow with hover boost
+        const effectiveGlow = Math.min(1.0, (agent.glow_intensity || 0) + hoverState.glowBoost);
+
         // Draw outer glow first (underneath)
-        drawGlow(ctx, screenX, screenY, scaledRadius, color, agent.glow_intensity || 0);
+        drawGlow(ctx, screenX, screenY, scaledRadius, color, effectiveGlow);
 
         // Generate amoeba shape points
         const numPoints = 24;  // Enough points for smooth shape
@@ -344,8 +353,8 @@
             time
         );
 
-        // Create gradient fill
-        const gradient = createAgentGradient(ctx, screenX, screenY, scaledRadius, color, agent.glow_intensity || 0);
+        // Create gradient fill with hover-boosted glow
+        const gradient = createAgentGradient(ctx, screenX, screenY, scaledRadius, color, effectiveGlow);
 
         // Draw the amoeba shape
         ctx.save();

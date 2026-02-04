@@ -333,6 +333,11 @@
     function renderFrame(ctx, frame, animationTime, canvasWidth, canvasHeight) {
         if (!frame) return;
 
+        // Update interaction module with current frame for hit testing
+        if (typeof LoopEngineInteraction !== 'undefined') {
+            LoopEngineInteraction.setFrame(frame);
+        }
+
         // Layer 1: Label regions (lowest - soft translucent clouds)
         if (typeof LoopEngineLabels !== 'undefined' && frame.label_regions) {
             LoopEngineLabels.renderLabelRegions(ctx, frame.label_regions, animationTime, viewport);
@@ -353,8 +358,10 @@
             LoopEngineAgents.renderAgents(ctx, frame.agents, animationTime, viewport);
         }
 
-        // Layer 5: Hover/selection overlays (to be implemented by interaction.js)
-        // This layer is handled externally
+        // Layer 5: Hover/selection overlays (tooltips)
+        if (typeof LoopEngineInteraction !== 'undefined') {
+            LoopEngineInteraction.renderTooltip(ctx);
+        }
     }
 
     /**

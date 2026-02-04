@@ -247,11 +247,22 @@
             return;
         }
 
+        // Check if link is highlighted (connected to hovered agent)
+        let isHighlighted = false;
+        if (typeof LoopEngineInteraction !== 'undefined') {
+            isHighlighted = LoopEngineInteraction.isLinkHighlighted(link);
+        }
+
         // Get link properties
-        const color = link.color || LINK_TYPE_COLORS[link.link_type] || LINK_TYPE_COLORS.default;
+        let color = link.color || LINK_TYPE_COLORS[link.link_type] || LINK_TYPE_COLORS.default;
         const thickness = link.thickness || 2.0;
         const swayPhase = link.sway_phase || 0;
         const linkIdHash = hashString(link.id);
+
+        // Brighten color if highlighted
+        if (isHighlighted) {
+            color = brightenColor(color);
+        }
 
         // Check for bidirectional link
         const reverseLink = findReverseLink(link, allLinks);
@@ -275,15 +286,40 @@
         // Apply sway animation
         controlPoints = applySwayToControlPoints(controlPoints, swayPhase, time, linkIdHash);
 
-        // Scale thickness with viewport
+        // Scale thickness with viewport (thicker if highlighted)
         const scale = viewport ? viewport.scale : 1;
-        const scaledThickness = Math.max(1, thickness * Math.sqrt(scale));
+        const thicknessMultiplier = isHighlighted ? 1.5 : 1.0;
+        const scaledThickness = Math.max(1, thickness * Math.sqrt(scale) * thicknessMultiplier);
 
-        // Draw glow first (behind)
-        drawLinkGlow(ctx, controlPoints, color, scaledThickness);
+        // Draw glow first (behind) - stronger glow if highlighted
+        const glowMultiplier = isHighlighted ? 2.0 : 1.0;
+        drawLinkGlow(ctx, controlPoints, color, scaledThickness * glowMultiplier);
 
-        // Draw the main curve
-        drawBezierCurve(ctx, controlPoints, color, scaledThickness, 0.8);
+        // Draw the main curve (brighter alpha if highlighted)
+        const alpha = isHighlighted ? 1.0 : 0.8;
+        drawBezierCurve(ctx, controlPoints, color, scaledThickness, alpha);
+    }
+
+    /**
+     * Brighten a hex color.
+     * @param {string} hex - Hex color string
+     * @returns {string} Brightened hex color
+     */
+    function brightenColor(hex) {
+        // Parse hex
+        const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+        if (!result) return hex;
+
+        let r = parseInt(result[1], 16);
+        let g = parseInt(result[2], 16);
+        let b = parseInt(result[3], 16);
+
+        // Brighten by 40%
+        r = Math.min(255, Math.floor(r + (255 - r) * 0.4));
+        g = Math.min(255, Math.floor(g + (255 - g) * 0.4));
+        b = Math.min(255, Math.floor(b + (255 - b) * 0.4));
+
+        return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
     }
 
     /**

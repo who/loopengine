@@ -43,6 +43,12 @@ class AgentVisual:
     ooda_phase: str = "sense"  # Current OODA phase
     labels: list[str] = field(default_factory=list)
 
+    # Genome traits for hover tooltip
+    genome: dict[str, float] = field(default_factory=dict)
+
+    # Input buffer depth for tooltip display
+    input_buffer_depth: int = 0
+
 
 @dataclass
 class LinkVisual:
@@ -215,6 +221,8 @@ def _project_agent(agent: Agent, tick: int) -> AgentVisual:
         glow_intensity=glow_intensity,
         ooda_phase=agent.loop_phase.value,
         labels=list(agent.labels),
+        genome=dict(agent.genome),
+        input_buffer_depth=buffer_depth,
     )
 
 
