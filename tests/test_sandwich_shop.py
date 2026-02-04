@@ -4,14 +4,18 @@ from loopengine.corpora.sandwich_shop import (
     EXTRAS,
     SANDWICH_TYPES,
     SPECIAL_REQUESTS,
+    alex_policy,
+    create_agents,
     create_external_inputs,
     create_labels,
     create_links,
     create_world,
     customer_arrival_schedule,
     generate_customer_order_payload,
+    maria_policy,
+    tom_policy,
 )
-from loopengine.model import LinkType
+from loopengine.model import LinkType, Particle
 
 
 def test_links_count() -> None:
@@ -353,3 +357,274 @@ def test_create_world_has_external_inputs() -> None:
     world = create_world()
     assert len(world.external_inputs) == 1
     assert world.external_inputs[0].name == "customer_arrivals"
+
+
+# ============================================================================
+# AGENT TESTS (PRD Section 9.2)
+# ============================================================================
+
+
+def test_agents_count() -> None:
+    """Verify 3 agents are created."""
+    agents = create_agents()
+    assert len(agents) == 3
+
+
+def test_agents_ids() -> None:
+    """Verify all agent IDs match PRD naming."""
+    agents = create_agents()
+    expected_ids = {"maria", "tom", "alex"}
+    assert set(agents.keys()) == expected_ids
+
+
+def test_maria_agent_role() -> None:
+    """Verify Maria agent has owner role per PRD."""
+    agents = create_agents()
+    maria = agents["maria"]
+
+    assert maria.id == "maria"
+    assert maria.name == "Maria"
+    assert maria.role == "owner"
+
+
+def test_maria_agent_loop_period() -> None:
+    """Verify Maria has loop_period=300 per PRD."""
+    agents = create_agents()
+    maria = agents["maria"]
+    assert maria.loop_period == 300
+
+
+def test_maria_agent_labels() -> None:
+    """Verify Maria has Management label per PRD."""
+    agents = create_agents()
+    maria = agents["maria"]
+
+    assert "SandwichShop" in maria.labels
+    assert "Management" in maria.labels
+
+
+def test_maria_agent_genome() -> None:
+    """Verify Maria has correct initial genome values per PRD."""
+    agents = create_agents()
+    maria = agents["maria"]
+
+    assert maria.genome["supply_forecasting"] == 0.7
+    assert maria.genome["observation"] == 0.8
+    assert maria.genome["decisiveness"] == 0.6
+    assert maria.genome["delegation"] == 0.7
+    assert maria.genome["cost_sensitivity"] == 0.9
+
+
+def test_maria_agent_has_policy() -> None:
+    """Verify Maria has a working policy callable."""
+    agents = create_agents()
+    maria = agents["maria"]
+
+    assert callable(maria.policy)
+    # Policy should accept sensed_inputs, genome, internal_state
+    result = maria.policy([], maria.genome, {})
+    assert isinstance(result, list)
+
+
+def test_tom_agent_role() -> None:
+    """Verify Tom agent has sandwich_maker role per PRD."""
+    agents = create_agents()
+    tom = agents["tom"]
+
+    assert tom.id == "tom"
+    assert tom.name == "Tom"
+    assert tom.role == "sandwich_maker"
+
+
+def test_tom_agent_loop_period() -> None:
+    """Verify Tom has loop_period=30 per PRD."""
+    agents = create_agents()
+    tom = agents["tom"]
+    assert tom.loop_period == 30
+
+
+def test_tom_agent_labels() -> None:
+    """Verify Tom has Kitchen label per PRD."""
+    agents = create_agents()
+    tom = agents["tom"]
+
+    assert "SandwichShop" in tom.labels
+    assert "FrontLine" in tom.labels
+    assert "Kitchen" in tom.labels
+
+
+def test_tom_agent_genome() -> None:
+    """Verify Tom has correct initial genome values per PRD."""
+    agents = create_agents()
+    tom = agents["tom"]
+
+    assert tom.genome["speed"] == 0.7
+    assert tom.genome["consistency"] == 0.8
+    assert tom.genome["ingredient_intuition"] == 0.6
+    assert tom.genome["stress_tolerance"] == 0.7
+    assert tom.genome["waste_minimization"] == 0.5
+
+
+def test_tom_agent_has_policy() -> None:
+    """Verify Tom has a working policy callable."""
+    agents = create_agents()
+    tom = agents["tom"]
+
+    assert callable(tom.policy)
+    result = tom.policy([], tom.genome, {})
+    assert isinstance(result, list)
+
+
+def test_alex_agent_role() -> None:
+    """Verify Alex agent has cashier role per PRD."""
+    agents = create_agents()
+    alex = agents["alex"]
+
+    assert alex.id == "alex"
+    assert alex.name == "Alex"
+    assert alex.role == "cashier"
+
+
+def test_alex_agent_loop_period() -> None:
+    """Verify Alex has loop_period=20 per PRD (fastest loop)."""
+    agents = create_agents()
+    alex = agents["alex"]
+    assert alex.loop_period == 20
+
+
+def test_alex_agent_labels() -> None:
+    """Verify Alex has Register label per PRD."""
+    agents = create_agents()
+    alex = agents["alex"]
+
+    assert "SandwichShop" in alex.labels
+    assert "FrontLine" in alex.labels
+    assert "Register" in alex.labels
+
+
+def test_alex_agent_has_policy() -> None:
+    """Verify Alex has a working policy callable."""
+    agents = create_agents()
+    alex = agents["alex"]
+
+    assert callable(alex.policy)
+    result = alex.policy([], alex.genome, {})
+    assert isinstance(result, list)
+
+
+def test_create_world_has_agents() -> None:
+    """Verify create_world populates world.agents."""
+    world = create_world()
+    assert len(world.agents) == 3
+    assert "maria" in world.agents
+    assert "tom" in world.agents
+    assert "alex" in world.agents
+
+
+# ============================================================================
+# POLICY BEHAVIOR TESTS
+# ============================================================================
+
+
+def test_tom_policy_produces_sandwich() -> None:
+    """Verify Tom's policy produces finished_sandwich from order_ticket."""
+    order_ticket = Particle(
+        id="test_ticket",
+        particle_type="order_ticket",
+        payload={"sandwich_type": "BLT", "extras": []},
+        source_id="alex",
+        dest_id="tom",
+        link_id="alex_to_tom",
+    )
+
+    genome = {"speed": 0.7, "consistency": 0.8, "waste_minimization": 0.5}
+    internal_state: dict = {}
+
+    result = tom_policy([order_ticket], genome, internal_state)
+
+    # Should have at least one finished_sandwich
+    sandwiches = [p for p in result if p.particle_type == "finished_sandwich"]
+    assert len(sandwiches) >= 1
+    assert sandwiches[0].dest_id == "alex"
+    assert sandwiches[0].source_id == "tom"
+
+
+def test_alex_policy_produces_ticket() -> None:
+    """Verify Alex's policy produces order_ticket from customer_order."""
+    customer_order = Particle(
+        id="test_customer",
+        particle_type="customer_order",
+        payload={"sandwich_type": "Club", "extras": ["cheese"]},
+        source_id="external",
+        dest_id="alex",
+        link_id="",
+    )
+
+    genome = {"speed": 0.8, "accuracy": 0.7}
+    internal_state: dict = {}
+
+    result = alex_policy([customer_order], genome, internal_state)
+
+    # Should have one order_ticket for Tom
+    tickets = [p for p in result if p.particle_type == "order_ticket"]
+    assert len(tickets) == 1
+    assert tickets[0].dest_id == "tom"
+    assert tickets[0].source_id == "alex"
+
+
+def test_alex_policy_serves_customer() -> None:
+    """Verify Alex's policy serves customer when sandwich arrives."""
+    # First, process a customer order to set up waiting customer
+    customer_order = Particle(
+        id="test_customer",
+        particle_type="customer_order",
+        payload={"sandwich_type": "BLT"},
+        source_id="external",
+        dest_id="alex",
+        link_id="",
+    )
+
+    genome = {"speed": 0.8, "accuracy": 0.7}
+    internal_state: dict = {}
+
+    alex_policy([customer_order], genome, internal_state)
+    assert len(internal_state["waiting_customers"]) == 1
+
+    # Now deliver a sandwich
+    sandwich = Particle(
+        id="test_sandwich",
+        particle_type="finished_sandwich",
+        payload={"order": {"sandwich_type": "BLT"}, "quality": 0.9},
+        source_id="tom",
+        dest_id="alex",
+        link_id="tom_to_alex",
+    )
+
+    result = alex_policy([sandwich], genome, internal_state)
+
+    # Should have served_customer
+    served = [p for p in result if p.particle_type == "served_customer"]
+    assert len(served) == 1
+    assert served[0].dest_id == "external"
+
+
+def test_maria_policy_responds_to_stockout() -> None:
+    """Verify Maria's policy generates supply_order from stockout_alert."""
+    stockout = Particle(
+        id="test_stockout",
+        particle_type="stockout_alert",
+        payload={"item": "lettuce"},
+        source_id="tom",
+        dest_id="maria",
+        link_id="tom_to_maria",
+    )
+
+    genome = {"cost_sensitivity": 0.5, "decisiveness": 0.6}
+    internal_state: dict = {}
+
+    result = maria_policy([stockout], genome, internal_state)
+
+    # Should have supply_order
+    orders = [p for p in result if p.particle_type == "supply_order"]
+    assert len(orders) >= 1
+    assert orders[0].source_id == "maria"

@@ -9,7 +9,16 @@ from __future__ import annotations
 import random
 from typing import Any
 
-from loopengine.model import ExternalInput, Label, LabelContext, Link, LinkType, World
+from loopengine.model import (
+    Agent,
+    ExternalInput,
+    Label,
+    LabelContext,
+    Link,
+    LinkType,
+    Particle,
+    World,
+)
 
 # Sandwich types and extras for payload generation
 SANDWICH_TYPES = ["BLT", "Club", "Reuben", "Turkey", "Veggie", "Philly"]
@@ -225,13 +234,292 @@ def create_labels() -> dict[str, Label]:
     return labels
 
 
-def create_world() -> World:
-    """Create the sandwich shop world with links, labels, and external inputs.
+def maria_policy(
+    sensed_inputs: list[Particle],
+    genome: dict[str, float],
+    internal_state: dict[str, Any],
+) -> list[Particle]:
+    """Maria's owner policy: observe shop state and issue directives or supply orders.
+
+    On SENSE: observe shop state (queue depth, supply levels, throughput rate)
+    On DECIDE: if queue depth exceeds threshold, send directive to Alex/Tom
+               if supply levels low, generate supply order
+               if healthy, do nothing (conserve attention)
+
+    Args:
+        sensed_inputs: Particles received (status_reports, revenue_reports, stockout_alerts)
+        genome: Maria's genome traits
+        internal_state: Current internal state
 
     Returns:
-        World: A world containing the sandwich shop links, labels, and external inputs.
+        list[Particle]: Output particles (directives, supply_orders)
+    """
+    outputs: list[Particle] = []
+
+    # Process incoming reports
+    for particle in sensed_inputs:
+        if particle.particle_type == "stockout_alert":
+            # Generate supply order if cost-sensitive threshold allows
+            if genome.get("cost_sensitivity", 0.5) < 0.95:  # Very cost-sensitive might delay
+                outputs.append(
+                    Particle(
+                        id=f"supply_order_{particle.id}",
+                        particle_type="supply_order",
+                        payload={"item": particle.payload.get("item", "general_supplies")},
+                        source_id="maria",
+                        dest_id="external",
+                        link_id="",
+                    )
+                )
+
+    # Check queue depth from internal state and issue directives
+    queue_depth = internal_state.get("observed_queue_depth", 0)
+    threshold = 5 * (1 - genome.get("decisiveness", 0.6))  # More decisive = lower threshold
+
+    if queue_depth > threshold:
+        # Issue directive based on delegation trait
+        if genome.get("delegation", 0.7) > 0.5:
+            outputs.append(
+                Particle(
+                    id=f"directive_speed_up_{internal_state.get('tick', 0)}",
+                    particle_type="directive",
+                    payload={"action": "speed_up", "urgency": "high"},
+                    source_id="maria",
+                    dest_id="alex",
+                    link_id="maria_to_alex",
+                )
+            )
+
+    return outputs
+
+
+def tom_policy(
+    sensed_inputs: list[Particle],
+    genome: dict[str, float],
+    internal_state: dict[str, Any],
+) -> list[Particle]:
+    """Tom's sandwich_maker policy: read tickets, make sandwiches, report status.
+
+    On SENSE: read next ticket from input buffer
+    On ORIENT: check ingredient availability
+    On DECIDE: plan assembly or substitute based on ingredient_intuition
+    On ACT: produce sandwich, send to Alex, report stockouts to Maria
+
+    Args:
+        sensed_inputs: Particles received (order_tickets, directives, ingredients)
+        genome: Tom's genome traits
+        internal_state: Current internal state
+
+    Returns:
+        list[Particle]: Output particles (finished_sandwich, status_report, stockout_alert)
+    """
+    outputs: list[Particle] = []
+
+    for particle in sensed_inputs:
+        if particle.particle_type == "order_ticket":
+            # Process the order - quality based on consistency and speed tradeoff
+            speed = genome.get("speed", 0.7)
+            consistency = genome.get("consistency", 0.8)
+
+            # Faster work may sacrifice consistency
+            quality = consistency * (1 - (speed - 0.5) * 0.2)
+            quality = max(0.5, min(1.0, quality))
+
+            # Create finished sandwich
+            outputs.append(
+                Particle(
+                    id=f"sandwich_{particle.id}",
+                    particle_type="finished_sandwich",
+                    payload={
+                        "order": particle.payload,
+                        "quality": quality,
+                        "maker": "tom",
+                    },
+                    source_id="tom",
+                    dest_id="alex",
+                    link_id="tom_to_alex",
+                )
+            )
+
+            # Check for waste based on waste_minimization trait
+            waste_chance = 0.1 * (1 - genome.get("waste_minimization", 0.5))
+            if internal_state.get("random", lambda: 0.5)() < waste_chance:
+                outputs.append(
+                    Particle(
+                        id=f"waste_{particle.id}",
+                        particle_type="waste",
+                        payload={"reason": "ingredient_spillage"},
+                        source_id="tom",
+                        dest_id="external",
+                        link_id="",
+                    )
+                )
+
+        elif particle.particle_type == "directive":
+            # Acknowledge directive
+            internal_state["current_directive"] = particle.payload
+
+    return outputs
+
+
+def alex_policy(
+    sensed_inputs: list[Particle],
+    genome: dict[str, float],
+    internal_state: dict[str, Any],
+) -> list[Particle]:
+    """Alex's cashier policy: take orders, create tickets, serve customers.
+
+    On SENSE: check for waiting customer
+    On ORIENT: read customer order
+    On DECIDE: create order ticket
+    On ACT: emit ticket to Tom, match sandwiches to customers, send revenue reports
+
+    Args:
+        sensed_inputs: Particles received (customer_order, finished_sandwich, directive)
+        genome: Alex's genome traits
+        internal_state: Current internal state
+
+    Returns:
+        list[Particle]: Output particles (order_ticket, served_customer, revenue_report)
+    """
+    outputs: list[Particle] = []
+
+    # Initialize waiting customers queue in internal state if needed
+    if "waiting_customers" not in internal_state:
+        internal_state["waiting_customers"] = []
+
+    for particle in sensed_inputs:
+        if particle.particle_type == "customer_order":
+            # Create order ticket for Tom
+            outputs.append(
+                Particle(
+                    id=f"ticket_{particle.id}",
+                    particle_type="order_ticket",
+                    payload=particle.payload,
+                    source_id="alex",
+                    dest_id="tom",
+                    link_id="alex_to_tom",
+                )
+            )
+            # Track waiting customer
+            internal_state["waiting_customers"].append(particle.id)
+
+        elif particle.particle_type == "finished_sandwich":
+            # Match sandwich to waiting customer
+            if internal_state["waiting_customers"]:
+                customer_id = internal_state["waiting_customers"].pop(0)
+                # Serve customer
+                outputs.append(
+                    Particle(
+                        id=f"served_{customer_id}",
+                        particle_type="served_customer",
+                        payload={
+                            "customer_id": customer_id,
+                            "sandwich": particle.payload,
+                        },
+                        source_id="alex",
+                        dest_id="external",
+                        link_id="",
+                    )
+                )
+
+                # Periodic revenue report to Maria
+                served_count = internal_state.get("served_count", 0) + 1
+                internal_state["served_count"] = served_count
+                if served_count % 10 == 0:
+                    outputs.append(
+                        Particle(
+                            id=f"revenue_report_{served_count}",
+                            particle_type="revenue_report",
+                            payload={"total_served": served_count},
+                            source_id="alex",
+                            dest_id="maria",
+                            link_id="alex_to_maria",
+                        )
+                    )
+
+        elif particle.particle_type == "directive":
+            # Store directive for behavior modification
+            internal_state["current_directive"] = particle.payload
+
+    return outputs
+
+
+def create_agents() -> dict[str, Agent]:
+    """Create the 3 agents for the sandwich shop per PRD section 9.2.
+
+    Agents:
+    - Maria (owner): loop_period=300, Management label, strategic decisions
+    - Tom (sandwich_maker): loop_period=30, Kitchen label, fast production
+    - Alex (cashier): loop_period=20, Register label, customer interaction
+
+    Returns:
+        dict[str, Agent]: Agents keyed by id.
+    """
+    agents = {}
+
+    # Maria - Owner
+    agents["maria"] = Agent(
+        id="maria",
+        name="Maria",
+        role="owner",
+        genome={
+            "supply_forecasting": 0.7,
+            "observation": 0.8,
+            "decisiveness": 0.6,
+            "delegation": 0.7,
+            "cost_sensitivity": 0.9,
+        },
+        labels={"SandwichShop", "Management"},
+        loop_period=300,
+        policy=maria_policy,
+    )
+
+    # Tom - Sandwich Maker
+    agents["tom"] = Agent(
+        id="tom",
+        name="Tom",
+        role="sandwich_maker",
+        genome={
+            "speed": 0.7,
+            "consistency": 0.8,
+            "ingredient_intuition": 0.6,
+            "stress_tolerance": 0.7,
+            "waste_minimization": 0.5,
+        },
+        labels={"SandwichShop", "FrontLine", "Kitchen"},
+        loop_period=30,
+        policy=tom_policy,
+    )
+
+    # Alex - Cashier
+    agents["alex"] = Agent(
+        id="alex",
+        name="Alex",
+        role="cashier",
+        genome={
+            "speed": 0.8,
+            "accuracy": 0.7,
+            "friendliness": 0.8,
+            "stress_tolerance": 0.6,
+            "upselling": 0.5,
+        },
+        labels={"SandwichShop", "FrontLine", "Register"},
+        loop_period=20,
+        policy=alex_policy,
+    )
+
+    return agents
+
+
+def create_world() -> World:
+    """Create the sandwich shop world with agents, links, labels, and external inputs.
+
+    Returns:
+        World: A world containing the complete sandwich shop simulation.
     """
     world = World()
+    world.agents = create_agents()
     world.links = create_links()
     world.labels = create_labels()
     world.external_inputs = create_external_inputs()
