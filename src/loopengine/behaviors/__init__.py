@@ -9,6 +9,10 @@ from loopengine.behaviors.ai_behavior_engine import (
     AIBehaviorEngine,
     AIBehaviorEngineError,
 )
+from loopengine.behaviors.behavior_cache import (
+    BehaviorCache,
+    CacheEntry,
+)
 from loopengine.behaviors.behavior_history import (
     BehaviorHistoryStore,
     StoredBehavior,
@@ -90,8 +94,10 @@ __all__ = [
     "AgentTypeExtractorError",
     "AgentTypeSchema",
     "AlertSeverity",
+    "BehaviorCache",
     "BehaviorHistoryStore",
     "BehaviorResponse",
+    "CacheEntry",
     "ConstraintContext",
     "ConstraintSchema",
     "DomainContext",
