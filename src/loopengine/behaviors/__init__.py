@@ -33,6 +33,11 @@ from loopengine.behaviors.fallback import (
     FallbackReason,
     classify_error,
 )
+from loopengine.behaviors.interaction_extractor import (
+    Interaction,
+    InteractionExtractor,
+    InteractionExtractorError,
+)
 from loopengine.behaviors.llm_client import (
     BehaviorResponse,
     LLMClient,
@@ -43,6 +48,11 @@ from loopengine.behaviors.prompt_builder import (
     AgentContext,
     DomainContext,
     PromptBuilder,
+)
+from loopengine.behaviors.resource_extractor import (
+    Resource,
+    ResourceExtractor,
+    ResourceExtractorError,
 )
 from loopengine.behaviors.response_parser import (
     ResponseParser,
@@ -67,6 +77,9 @@ __all__ = [
     "DomainStoreError",
     "FallbackBehavior",
     "FallbackReason",
+    "Interaction",
+    "InteractionExtractor",
+    "InteractionExtractorError",
     "InteractionSchema",
     "LLMClient",
     "LLMClientSettings",
@@ -74,6 +87,9 @@ __all__ = [
     "LLMProvider",
     "LLMQuery",
     "PromptBuilder",
+    "Resource",
+    "ResourceExtractor",
+    "ResourceExtractorError",
     "ResourceSchema",
     "ResponseParser",
     "ResponseParserError",
