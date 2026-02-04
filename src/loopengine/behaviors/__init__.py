@@ -9,6 +9,10 @@ from loopengine.behaviors.ai_behavior_engine import (
     AIBehaviorEngine,
     AIBehaviorEngineError,
 )
+from loopengine.behaviors.behavior_history import (
+    BehaviorHistoryStore,
+    StoredBehavior,
+)
 from loopengine.behaviors.config import (
     LLMConfig,
     LLMProvider,
@@ -84,6 +88,7 @@ __all__ = [
     "AgentTypeExtractorError",
     "AgentTypeSchema",
     "AlertSeverity",
+    "BehaviorHistoryStore",
     "BehaviorResponse",
     "DomainContext",
     "DomainMetadata",
@@ -119,6 +124,7 @@ __all__ = [
     "ResponseParser",
     "ResponseParserError",
     "SlowQueryEvent",
+    "StoredBehavior",
     "StoredDomain",
     "classify_error",
     "extract_retry_after",

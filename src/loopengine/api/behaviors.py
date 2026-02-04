@@ -1,21 +1,25 @@
 """API endpoints for behavior generation.
 
 This module provides REST API endpoints for generating agent behaviors
-using the AIBehaviorEngine and domain configurations.
+using the AIBehaviorEngine and domain configurations, as well as viewing
+and exporting generated behaviors for inspection and documentation.
 """
 
 import logging
 import time
+from enum import StrEnum
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 
 from loopengine.behaviors import (
     AIBehaviorEngine,
     AIBehaviorEngineError,
+    BehaviorHistoryStore,
     DomainStore,
     DomainStoreError,
+    StoredBehavior,
 )
 from loopengine.behaviors.prompt_builder import AgentContext, DomainContext
 
@@ -101,6 +105,7 @@ class GenerateBehaviorResponse(BaseModel):
 
 # Engine instance cache for reuse
 _engine: AIBehaviorEngine | None = None
+_history_store: BehaviorHistoryStore | None = None
 
 
 def _get_engine() -> AIBehaviorEngine:
@@ -122,6 +127,28 @@ def _get_store() -> DomainStore:
         DomainStore instance.
     """
     return DomainStore()
+
+
+def _get_history_store() -> BehaviorHistoryStore:
+    """Get or create a BehaviorHistoryStore instance.
+
+    Returns:
+        BehaviorHistoryStore instance.
+    """
+    global _history_store
+    if _history_store is None:
+        _history_store = BehaviorHistoryStore(max_size=10000)
+    return _history_store
+
+
+def set_history_store(store: BehaviorHistoryStore) -> None:
+    """Set the history store instance (for testing).
+
+    Args:
+        store: BehaviorHistoryStore instance to use.
+    """
+    global _history_store
+    _history_store = store
 
 
 def _find_agent_type_in_schema(
@@ -288,6 +315,25 @@ async def generate_behavior(
         total_latency_ms,
     )
 
+    # Record behavior to history for export
+    history_store = _get_history_store()
+    stored_behavior = StoredBehavior(
+        timestamp=time.time(),
+        domain_id=request.domain_id,
+        domain_type=stored.schema_.domain_type,
+        agent_type=agent_name,
+        agent_role=agent_role,
+        action=behavior_response.action,
+        parameters=behavior_response.parameters,
+        reasoning=behavior_response.reasoning,
+        context=request.context,
+        latency_ms=round(engine_latency, 2),
+        provider=provider,
+        cached=cached,
+        fallback=behavior_response.metadata.get("fallback", False),
+    )
+    history_store.record(stored_behavior)
+
     return GenerateBehaviorResponse(
         action=behavior_response.action,
         parameters=behavior_response.parameters,
@@ -298,3 +344,313 @@ async def generate_behavior(
             provider=provider,
         ),
     )
+
+
+class ExportFormat(StrEnum):
+    """Export format options."""
+
+    JSON = "json"
+    HUMAN_READABLE = "human_readable"
+
+
+class ExportedBehavior(BaseModel):
+    """Exported behavior record.
+
+    Attributes:
+        timestamp: When the behavior was generated (epoch seconds).
+        domain_id: ID of the domain configuration used.
+        domain_type: Type of domain.
+        agent_type: Type of agent that requested the behavior.
+        agent_role: Role description of the agent.
+        action: The action the agent should take.
+        parameters: Parameters for the action.
+        reasoning: Explanation of why this action was chosen.
+        context: Context provided with the request.
+        latency_ms: Time taken to generate the behavior.
+        provider: LLM provider used.
+        cached: Whether the response was cached.
+        fallback: Whether this was a fallback response.
+    """
+
+    timestamp: float = Field(description="When the behavior was generated (epoch)")
+    domain_id: str = Field(description="Domain configuration ID")
+    domain_type: str = Field(description="Type of domain")
+    agent_type: str = Field(description="Agent type")
+    agent_role: str = Field(description="Agent role description")
+    action: str = Field(description="The action chosen")
+    parameters: dict[str, Any] = Field(default_factory=dict, description="Action parameters")
+    reasoning: str = Field(default="", description="Reasoning for the action")
+    context: dict[str, Any] | None = Field(default=None, description="Context provided")
+    latency_ms: float = Field(description="Generation latency in milliseconds")
+    provider: str = Field(description="LLM provider used")
+    cached: bool = Field(description="Whether response was cached")
+    fallback: bool = Field(description="Whether this was a fallback response")
+
+
+class ExportResponse(BaseModel):
+    """Response for behavior export.
+
+    Attributes:
+        behaviors: List of exported behaviors.
+        total_count: Total number of matching behaviors.
+        offset: Pagination offset used.
+        limit: Pagination limit used.
+    """
+
+    behaviors: list[ExportedBehavior] = Field(description="Exported behaviors")
+    total_count: int = Field(description="Total matching behaviors")
+    offset: int = Field(description="Pagination offset")
+    limit: int = Field(description="Pagination limit")
+
+
+class ExportStatsResponse(BaseModel):
+    """Response for behavior export statistics.
+
+    Attributes:
+        size: Current number of stored behaviors.
+        total_recorded: Total behaviors recorded since startup.
+        max_size: Maximum storage capacity.
+        unique_domains: Number of unique domains.
+        unique_agent_types: Number of unique agent types.
+    """
+
+    size: int = Field(description="Current number of stored behaviors")
+    total_recorded: int = Field(description="Total behaviors ever recorded")
+    max_size: int = Field(description="Maximum storage capacity")
+    unique_domains: int = Field(description="Number of unique domains")
+    unique_agent_types: int = Field(description="Number of unique agent types")
+
+
+@router.get(
+    "/export",
+    response_model=ExportResponse,
+    responses={
+        200: {"description": "Behaviors exported successfully"},
+    },
+)
+async def export_behaviors(
+    domain_id: str | None = Query(default=None, description="Filter by domain ID"),
+    domain_type: str | None = Query(default=None, description="Filter by domain type"),
+    agent_type: str | None = Query(default=None, description="Filter by agent type"),
+    start_time: float | None = Query(
+        default=None, description="Filter by minimum timestamp (epoch seconds)"
+    ),
+    end_time: float | None = Query(
+        default=None, description="Filter by maximum timestamp (epoch seconds)"
+    ),
+    limit: int = Query(default=100, ge=1, le=10000, description="Maximum behaviors to return"),
+    offset: int = Query(default=0, ge=0, description="Number of behaviors to skip"),
+) -> ExportResponse:
+    """Export generated behaviors with optional filtering.
+
+    Supports filtering by domain, agent type, and time range. Results are
+    returned in reverse chronological order (most recent first).
+
+    Use for inspection, debugging, and documentation of agent behaviors.
+
+    Args:
+        domain_id: Optional filter by domain ID.
+        domain_type: Optional filter by domain type.
+        agent_type: Optional filter by agent type.
+        start_time: Optional minimum timestamp (epoch seconds).
+        end_time: Optional maximum timestamp (epoch seconds).
+        limit: Maximum number of behaviors to return (1-10000).
+        offset: Number of matching behaviors to skip for pagination.
+
+    Returns:
+        ExportResponse with matching behaviors and pagination info.
+    """
+    history_store = _get_history_store()
+
+    # Get total count for pagination info
+    total_count = history_store.count(
+        domain_id=domain_id,
+        domain_type=domain_type,
+        agent_type=agent_type,
+        start_time=start_time,
+        end_time=end_time,
+    )
+
+    # Get behaviors
+    behaviors = history_store.export(
+        domain_id=domain_id,
+        domain_type=domain_type,
+        agent_type=agent_type,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        offset=offset,
+    )
+
+    exported = [
+        ExportedBehavior(
+            timestamp=b.timestamp,
+            domain_id=b.domain_id,
+            domain_type=b.domain_type,
+            agent_type=b.agent_type,
+            agent_role=b.agent_role,
+            action=b.action,
+            parameters=b.parameters,
+            reasoning=b.reasoning,
+            context=b.context,
+            latency_ms=b.latency_ms,
+            provider=b.provider,
+            cached=b.cached,
+            fallback=b.fallback,
+        )
+        for b in behaviors
+    ]
+
+    return ExportResponse(
+        behaviors=exported,
+        total_count=total_count,
+        offset=offset,
+        limit=limit,
+    )
+
+
+@router.get(
+    "/export/text",
+    responses={
+        200: {
+            "description": "Behaviors exported as human-readable text",
+            "content": {"text/plain": {}},
+        },
+    },
+)
+async def export_behaviors_text(
+    domain_id: str | None = Query(default=None, description="Filter by domain ID"),
+    domain_type: str | None = Query(default=None, description="Filter by domain type"),
+    agent_type: str | None = Query(default=None, description="Filter by agent type"),
+    start_time: float | None = Query(
+        default=None, description="Filter by minimum timestamp (epoch seconds)"
+    ),
+    end_time: float | None = Query(
+        default=None, description="Filter by maximum timestamp (epoch seconds)"
+    ),
+    limit: int = Query(default=100, ge=1, le=10000, description="Maximum behaviors to return"),
+    offset: int = Query(default=0, ge=0, description="Number of behaviors to skip"),
+) -> str:
+    """Export generated behaviors as human-readable text.
+
+    Same filtering options as /export but returns plain text format
+    suitable for documentation and reports.
+
+    Args:
+        domain_id: Optional filter by domain ID.
+        domain_type: Optional filter by domain type.
+        agent_type: Optional filter by agent type.
+        start_time: Optional minimum timestamp (epoch seconds).
+        end_time: Optional maximum timestamp (epoch seconds).
+        limit: Maximum number of behaviors to return (1-10000).
+        offset: Number of matching behaviors to skip for pagination.
+
+    Returns:
+        Human-readable text representation of behaviors.
+    """
+    from fastapi.responses import PlainTextResponse
+
+    history_store = _get_history_store()
+
+    text = history_store.export_human_readable(
+        domain_id=domain_id,
+        domain_type=domain_type,
+        agent_type=agent_type,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        offset=offset,
+    )
+
+    return PlainTextResponse(content=text, media_type="text/plain")
+
+
+@router.get(
+    "/export/stats",
+    response_model=ExportStatsResponse,
+    responses={
+        200: {"description": "Export statistics retrieved successfully"},
+    },
+)
+async def get_export_stats() -> ExportStatsResponse:
+    """Get statistics about stored behaviors.
+
+    Returns information about the behavior history including current size,
+    total behaviors recorded, and unique domains/agent types.
+
+    Returns:
+        ExportStatsResponse with statistics.
+    """
+    history_store = _get_history_store()
+    stats = history_store.get_stats()
+
+    return ExportStatsResponse(
+        size=stats["size"],
+        total_recorded=stats["total_recorded"],
+        max_size=stats["max_size"],
+        unique_domains=stats["unique_domains"],
+        unique_agent_types=stats["unique_agent_types"],
+    )
+
+
+@router.get(
+    "/export/domains",
+    response_model=list[str],
+    responses={
+        200: {"description": "List of unique domain IDs"},
+    },
+)
+async def get_export_domains() -> list[str]:
+    """Get list of unique domain IDs in the behavior history.
+
+    Useful for discovering available domains for filtering.
+
+    Returns:
+        List of unique domain IDs.
+    """
+    history_store = _get_history_store()
+    return history_store.get_domains()
+
+
+@router.get(
+    "/export/agent-types",
+    response_model=list[str],
+    responses={
+        200: {"description": "List of unique agent types"},
+    },
+)
+async def get_export_agent_types(
+    domain_id: str | None = Query(default=None, description="Optional domain ID filter"),
+) -> list[str]:
+    """Get list of unique agent types in the behavior history.
+
+    Optionally filter by domain ID.
+
+    Args:
+        domain_id: Optional domain ID to filter by.
+
+    Returns:
+        List of unique agent types.
+    """
+    history_store = _get_history_store()
+    return history_store.get_agent_types(domain_id=domain_id)
+
+
+@router.delete(
+    "/export",
+    responses={
+        200: {"description": "Behavior history cleared successfully"},
+    },
+)
+async def clear_behavior_history() -> dict[str, str]:
+    """Clear all stored behavior history.
+
+    This permanently removes all stored behaviors. Use with caution.
+
+    Returns:
+        Success message.
+    """
+    history_store = _get_history_store()
+    history_store.clear()
+    logger.info("Behavior history cleared via API")
+    return {"message": "Behavior history cleared successfully"}
