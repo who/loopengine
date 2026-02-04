@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from loopengine.engine.ga import GAEngine, GAStats
+from loopengine.engine.ga import FitnessEvaluator, GAEngine, GAStats, evaluate_fitness
 from loopengine.model.genome import GenomeSchema, GenomeTrait
 
 
@@ -503,3 +503,198 @@ class TestGAEngineConfiguration:
         # With 100% mutation rate and high magnitude, values should differ
         differences = sum(1 for t in genome if abs(genome[t] - mutated[t]) > 0.001)
         assert differences > 0  # At least some traits mutated
+
+
+class TestFitnessEvaluation:
+    """Test fitness evaluation framework."""
+
+    @pytest.fixture
+    def sandwich_world(self):
+        """Create a sandwich shop world for testing."""
+        from loopengine.corpora.sandwich_shop import create_world
+
+        return create_world()
+
+    def test_evaluate_fitness_runs_simulation(self, sandwich_world) -> None:
+        """Test evaluate_fitness runs simulation for specified ticks."""
+        genome = {"speed": 0.7, "consistency": 0.8, "ingredient_intuition": 0.6}
+
+        def counting_fitness(world, agent_id) -> float:
+            return float(world.tick)
+
+        fitness = evaluate_fitness(
+            genome=genome,
+            world_template=sandwich_world,
+            target_agent_id="tom",
+            ticks=100,
+            fitness_fn=counting_fitness,
+            seed=42,
+        )
+
+        assert fitness == 100.0
+
+    def test_evaluate_fitness_applies_genome(self, sandwich_world) -> None:
+        """Test evaluate_fitness applies genome to target agent."""
+        test_genome = {"speed": 0.99, "consistency": 0.01}
+
+        def genome_check_fitness(world, agent_id) -> float:
+            agent_genome = world.agents[agent_id].genome
+            return agent_genome.get("speed", 0) - agent_genome.get("consistency", 0)
+
+        fitness = evaluate_fitness(
+            genome=test_genome,
+            world_template=sandwich_world,
+            target_agent_id="tom",
+            ticks=1,
+            fitness_fn=genome_check_fitness,
+        )
+
+        # speed - consistency = 0.99 - 0.01 = 0.98
+        assert abs(fitness - 0.98) < 0.001
+
+    def test_evaluate_fitness_isolates_world(self, sandwich_world) -> None:
+        """Test evaluate_fitness does not modify original world."""
+        original_tick = sandwich_world.tick
+        original_genome = sandwich_world.agents["tom"].genome.copy()
+
+        evaluate_fitness(
+            genome={"speed": 0.1, "consistency": 0.1},
+            world_template=sandwich_world,
+            target_agent_id="tom",
+            ticks=50,
+            fitness_fn=lambda w, a: 1.0,
+        )
+
+        # Original world should be unchanged
+        assert sandwich_world.tick == original_tick
+        assert sandwich_world.agents["tom"].genome == original_genome
+
+    def test_evaluate_fitness_deterministic_with_seed(self, sandwich_world) -> None:
+        """Test evaluate_fitness is deterministic given seed."""
+        genome = {"speed": 0.7, "consistency": 0.8}
+
+        def served_fitness(world, agent_id) -> float:
+            return float(
+                sum(a.internal_state.get("served_count", 0) for a in world.agents.values())
+            )
+
+        fitness1 = evaluate_fitness(
+            genome=genome,
+            world_template=sandwich_world,
+            target_agent_id="tom",
+            ticks=200,
+            fitness_fn=served_fitness,
+            seed=42,
+        )
+
+        fitness2 = evaluate_fitness(
+            genome=genome,
+            world_template=sandwich_world,
+            target_agent_id="tom",
+            ticks=200,
+            fitness_fn=served_fitness,
+            seed=42,
+        )
+
+        assert fitness1 == fitness2
+
+    def test_evaluate_fitness_returns_float(self, sandwich_world) -> None:
+        """Test evaluate_fitness returns scalar float."""
+        fitness = evaluate_fitness(
+            genome={"speed": 0.5},
+            world_template=sandwich_world,
+            target_agent_id="tom",
+            ticks=10,
+            fitness_fn=lambda w, a: 42.5,
+        )
+
+        assert isinstance(fitness, float)
+        assert fitness == 42.5
+
+    def test_evaluate_fitness_default_fitness_fn(self, sandwich_world) -> None:
+        """Test evaluate_fitness uses default fitness function when none provided."""
+        fitness = evaluate_fitness(
+            genome={"speed": 0.7, "consistency": 0.8},
+            world_template=sandwich_world,
+            target_agent_id="tom",
+            ticks=500,
+            seed=42,
+        )
+
+        # Default fitness is total served, should be >= 0
+        assert isinstance(fitness, float)
+        assert fitness >= 0.0
+
+    def test_evaluate_fitness_missing_agent_raises(self, sandwich_world) -> None:
+        """Test evaluate_fitness raises error for missing agent."""
+        with pytest.raises(ValueError, match="not found"):
+            evaluate_fitness(
+                genome={"speed": 0.5},
+                world_template=sandwich_world,
+                target_agent_id="nonexistent_agent",
+                ticks=10,
+                fitness_fn=lambda w, a: 1.0,
+            )
+
+
+class TestFitnessEvaluatorClass:
+    """Test FitnessEvaluator class directly."""
+
+    @pytest.fixture
+    def sandwich_world(self):
+        """Create a sandwich shop world for testing."""
+        from loopengine.corpora.sandwich_shop import create_world
+
+        return create_world()
+
+    def test_evaluator_requires_target_agent_id(self, sandwich_world) -> None:
+        """Test FitnessEvaluator raises error without target_agent_id."""
+        evaluator = FitnessEvaluator(fitness_fn=lambda w, a: 1.0)
+
+        with pytest.raises(ValueError, match="target_agent_id"):
+            evaluator.evaluate({"speed": 0.5}, sandwich_world)
+
+    def test_evaluator_requires_fitness_fn(self, sandwich_world) -> None:
+        """Test FitnessEvaluator raises error without fitness_fn."""
+        evaluator = FitnessEvaluator(target_agent_id="tom")
+
+        with pytest.raises(ValueError, match="fitness_fn"):
+            evaluator.evaluate({"speed": 0.5}, sandwich_world)
+
+    def test_evaluator_configurable_ticks(self, sandwich_world) -> None:
+        """Test FitnessEvaluator uses configurable tick count."""
+        ticks_run: list[int] = []
+
+        def track_ticks(world, agent_id) -> float:
+            ticks_run.append(world.tick)
+            return 1.0
+
+        evaluator = FitnessEvaluator(
+            target_agent_id="tom",
+            ticks=75,
+            fitness_fn=track_ticks,
+        )
+
+        evaluator.evaluate({"speed": 0.5}, sandwich_world)
+
+        assert ticks_run[0] == 75
+
+    def test_evaluator_captures_history(self, sandwich_world) -> None:
+        """Test FitnessEvaluator runs simulation that updates agent state."""
+
+        def check_internal_state(world, agent_id) -> float:
+            # Alex should have processed some customers (has internal_state changes)
+            alex = world.agents["alex"]
+            return float(len(alex.internal_state))
+
+        evaluator = FitnessEvaluator(
+            target_agent_id="tom",
+            ticks=200,
+            fitness_fn=check_internal_state,
+            seed=42,
+        )
+
+        fitness = evaluator.evaluate({"speed": 0.8}, sandwich_world)
+
+        # Alex should have internal state (waiting_customers, possibly served_count)
+        assert fitness > 0

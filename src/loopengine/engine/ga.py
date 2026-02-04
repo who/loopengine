@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import random
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -9,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from loopengine.model.genome import GenomeSchema
+    from loopengine.model.world import World
 
 
 @dataclass
@@ -293,3 +295,142 @@ class GAEngine:
             "fitness_evaluated": len(self.fitness_scores) > 0,
             "stats_history_length": len(self.stats_history),
         }
+
+
+@dataclass
+class FitnessEvaluator:
+    """Evaluates genome fitness by running simulations.
+
+    Runs a world simulation with a candidate genome applied to a target agent,
+    then computes fitness from the resulting history/state.
+    """
+
+    # Target configuration
+    target_agent_id: str = ""
+    target_role: str = ""
+
+    # Simulation parameters
+    ticks: int = 1000
+    seed: int | None = None
+
+    # Fitness computation
+    fitness_fn: Callable[[World, str], float] | None = None
+
+    def evaluate(
+        self,
+        genome: dict[str, float],
+        world_template: World,
+    ) -> float:
+        """Evaluate fitness of a genome by running a simulation.
+
+        Creates an isolated copy of the world, applies the candidate genome
+        to the target agent, runs the simulation for the configured number
+        of ticks, and computes fitness from the final state.
+
+        Args:
+            genome: Candidate genome to evaluate.
+            world_template: World template to clone for simulation.
+
+        Returns:
+            float: Scalar fitness value (higher is better).
+
+        Raises:
+            ValueError: If target agent not found or fitness function not set.
+        """
+        # Import here to avoid circular dependency
+        from loopengine.engine.simulation import tick_world
+
+        # Validate configuration
+        if not self.target_agent_id:
+            msg = "target_agent_id must be set"
+            raise ValueError(msg)
+
+        if self.fitness_fn is None:
+            msg = "fitness_fn must be set"
+            raise ValueError(msg)
+
+        # Clone world to isolate this evaluation
+        world = self._clone_world(world_template)
+
+        # Verify target agent exists
+        if self.target_agent_id not in world.agents:
+            msg = f"Target agent '{self.target_agent_id}' not found in world"
+            raise ValueError(msg)
+
+        # Apply candidate genome to target agent
+        world.agents[self.target_agent_id].genome = genome.copy()
+
+        # Set random seed for deterministic evaluation
+        if self.seed is not None:
+            random.seed(self.seed)
+
+        # Run simulation
+        for _ in range(self.ticks):
+            tick_world(world)
+
+        # Compute and return fitness
+        return self.fitness_fn(world, self.target_agent_id)
+
+    def _clone_world(self, world: World) -> World:
+        """Create a deep copy of the world for isolated simulation.
+
+        Args:
+            world: World to clone.
+
+        Returns:
+            World: Independent copy of the world.
+        """
+        return copy.deepcopy(world)
+
+
+def evaluate_fitness(
+    genome: dict[str, float],
+    world_template: World,
+    target_agent_id: str,
+    ticks: int = 1000,
+    fitness_fn: Callable[[World, str], float] | None = None,
+    seed: int | None = None,
+) -> float:
+    """Evaluate fitness of a genome by running a simulation.
+
+    Convenience function that creates a FitnessEvaluator and runs evaluation.
+    Clones the world template, applies the candidate genome to the target agent,
+    runs simulation for the specified ticks, and returns the fitness score.
+
+    Args:
+        genome: Candidate genome to evaluate.
+        world_template: World template to clone for simulation.
+        target_agent_id: ID of the agent to apply genome to.
+        ticks: Number of simulation ticks to run. Defaults to 1000.
+        fitness_fn: Function(world, agent_id) -> float for computing fitness.
+                   If None, uses a default that sums served_count across agents.
+        seed: Random seed for deterministic evaluation. If None, non-deterministic.
+
+    Returns:
+        float: Scalar fitness value (higher is better).
+
+    Example:
+        >>> from loopengine.corpora.sandwich_shop import create_world
+        >>> world = create_world()
+        >>> genome = {"speed": 0.9, "consistency": 0.7, ...}
+        >>> fitness = evaluate_fitness(
+        ...     genome, world, "tom", ticks=500,
+        ...     fitness_fn=lambda w, aid: w.agents[aid].internal_state.get("served_count", 0)
+        ... )
+    """
+    if fitness_fn is None:
+        # Default fitness: total customers served
+        def fitness_fn(world: World, agent_id: str) -> float:
+            total_served = sum(
+                a.internal_state.get("served_count", 0) for a in world.agents.values()
+            )
+            return float(total_served)
+
+    evaluator = FitnessEvaluator(
+        target_agent_id=target_agent_id,
+        ticks=ticks,
+        seed=seed,
+        fitness_fn=fitness_fn,
+    )
+
+    return evaluator.evaluate(genome, world_template)
