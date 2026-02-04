@@ -6,6 +6,7 @@ from loopengine.engine.ai_policy import (
     create_ai_policy_for_agent,
     enable_ai_behaviors,
 )
+from loopengine.engine.fitness import tom_fitness
 from loopengine.engine.forces import (
     ForceConfig,
     apply_forces,
@@ -30,5 +31,6 @@ __all__ = [
     "evaluate_fitness",
     "step_agent",
     "tick_world",
+    "tom_fitness",
     "update_layout",
 ]

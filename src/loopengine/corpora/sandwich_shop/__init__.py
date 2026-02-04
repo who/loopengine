@@ -315,6 +315,16 @@ def tom_policy(
     """
     outputs: list[Particle] = []
 
+    # Initialize fitness tracking metrics if needed
+    if "sandwiches_completed" not in internal_state:
+        internal_state["sandwiches_completed"] = 0
+    if "waste_count" not in internal_state:
+        internal_state["waste_count"] = 0
+    if "quality_scores" not in internal_state:
+        internal_state["quality_scores"] = []
+    if "ingredients_used" not in internal_state:
+        internal_state["ingredients_used"] = 0
+
     for particle in sensed_inputs:
         if particle.particle_type == "order_ticket":
             # Process the order - quality based on consistency and speed tradeoff
@@ -341,6 +351,11 @@ def tom_policy(
                 )
             )
 
+            # Track fitness metrics
+            internal_state["sandwiches_completed"] += 1
+            internal_state["quality_scores"].append(quality)
+            internal_state["ingredients_used"] += 1  # Base ingredient per sandwich
+
             # Check for waste based on waste_minimization trait
             waste_chance = 0.1 * (1 - genome.get("waste_minimization", 0.5))
             if internal_state.get("random", lambda: 0.5)() < waste_chance:
@@ -354,6 +369,9 @@ def tom_policy(
                         link_id="",
                     )
                 )
+                # Track waste for fitness
+                internal_state["waste_count"] += 1
+                internal_state["ingredients_used"] += 1  # Wasted ingredient
 
         elif particle.particle_type == "directive":
             # Acknowledge directive
@@ -387,6 +405,8 @@ def alex_policy(
     # Initialize waiting customers queue in internal state if needed
     if "waiting_customers" not in internal_state:
         internal_state["waiting_customers"] = []
+    if "max_queue_depth" not in internal_state:
+        internal_state["max_queue_depth"] = 0
 
     for particle in sensed_inputs:
         if particle.particle_type == "customer_order":
@@ -403,6 +423,10 @@ def alex_policy(
             )
             # Track waiting customer
             internal_state["waiting_customers"].append(particle.id)
+            # Track max queue depth for fitness evaluation
+            current_depth = len(internal_state["waiting_customers"])
+            if current_depth > internal_state["max_queue_depth"]:
+                internal_state["max_queue_depth"] = current_depth
 
         elif particle.particle_type == "finished_sandwich":
             # Match sandwich to waiting customer

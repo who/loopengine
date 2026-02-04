@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from loopengine.engine.fitness import tom_fitness
 from loopengine.engine.ga import FitnessEvaluator, GAEngine, GAStats, evaluate_fitness
 from loopengine.model.genome import GenomeSchema, GenomeTrait
 
@@ -886,3 +887,224 @@ class TestFitnessEvaluatorClass:
 
         # Alex should have internal state (waiting_customers, possibly served_count)
         assert fitness > 0
+
+
+class TestTomFitness:
+    """Test Tom's fitness function per PRD section 9.6."""
+
+    @pytest.fixture
+    def sandwich_world(self):
+        """Create a sandwich shop world for testing."""
+        from loopengine.corpora.sandwich_shop import create_world
+
+        return create_world()
+
+    def test_tom_fitness_counts_sandwiches_completed(self, sandwich_world) -> None:
+        """Test that tom_fitness counts sandwiches_completed from history."""
+        # Set up Tom's internal state with known values
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state["sandwiches_completed"] = 10
+        tom.internal_state["quality_scores"] = [0.8] * 10
+        tom.internal_state["waste_count"] = 0
+        tom.internal_state["ingredients_used"] = 10
+        sandwich_world.tick = 100
+
+        # Alex's queue depth
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state["max_queue_depth"] = 0
+
+        fitness = tom_fitness(sandwich_world, "tom")
+
+        # throughput = 10/100 = 0.1, avg_consistency = 0.8
+        # fitness = 0.1 * 0.8 - 0 - 0 = 0.08
+        assert abs(fitness - 0.08) < 0.001
+
+    def test_tom_fitness_computes_average_consistency_score(self, sandwich_world) -> None:
+        """Test that tom_fitness computes average_consistency_score."""
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state["sandwiches_completed"] = 5
+        tom.internal_state["quality_scores"] = [0.6, 0.7, 0.8, 0.9, 1.0]  # avg = 0.8
+        tom.internal_state["waste_count"] = 0
+        tom.internal_state["ingredients_used"] = 5
+        sandwich_world.tick = 100
+
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state["max_queue_depth"] = 0
+
+        fitness = tom_fitness(sandwich_world, "tom")
+
+        # throughput = 5/100 = 0.05, avg_consistency = 0.8
+        # fitness = 0.05 * 0.8 - 0 - 0 = 0.04
+        assert abs(fitness - 0.04) < 0.001
+
+    def test_tom_fitness_tracks_waste_particles(self, sandwich_world) -> None:
+        """Test that tom_fitness tracks waste_particles."""
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state["sandwiches_completed"] = 10
+        tom.internal_state["quality_scores"] = [1.0] * 10
+        tom.internal_state["waste_count"] = 5
+        tom.internal_state["ingredients_used"] = 15  # 10 sandwiches + 5 waste
+        sandwich_world.tick = 100
+
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state["max_queue_depth"] = 0
+
+        fitness = tom_fitness(sandwich_world, "tom")
+
+        # throughput = 10/100 = 0.1, avg_consistency = 1.0
+        # waste_ratio = 5/15 = 0.333...
+        # fitness = 0.1 * 1.0 - 0.333... - 0 ≈ -0.233
+        expected = 0.1 * 1.0 - (5 / 15)
+        assert abs(fitness - expected) < 0.001
+
+    def test_tom_fitness_measures_max_queue_depth(self, sandwich_world) -> None:
+        """Test that tom_fitness measures max_queue_depth."""
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state["sandwiches_completed"] = 10
+        tom.internal_state["quality_scores"] = [1.0] * 10
+        tom.internal_state["waste_count"] = 0
+        tom.internal_state["ingredients_used"] = 10
+        sandwich_world.tick = 100
+
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state["max_queue_depth"] = 5
+
+        fitness = tom_fitness(sandwich_world, "tom")
+
+        # throughput = 10/100 = 0.1, avg_consistency = 1.0
+        # queue_penalty = 5 * 0.1 = 0.5
+        # fitness = 0.1 * 1.0 - 0 - 0.5 = -0.4
+        expected = 0.1 * 1.0 - 0 - (5 * 0.1)
+        assert abs(fitness - expected) < 0.001
+
+    def test_tom_fitness_returns_scalar(self, sandwich_world) -> None:
+        """Test that tom_fitness returns scalar fitness."""
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state["sandwiches_completed"] = 5
+        tom.internal_state["quality_scores"] = [0.8] * 5
+        tom.internal_state["waste_count"] = 1
+        tom.internal_state["ingredients_used"] = 6
+        sandwich_world.tick = 50
+
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state["max_queue_depth"] = 2
+
+        fitness = tom_fitness(sandwich_world, "tom")
+
+        assert isinstance(fitness, float)
+
+    def test_tom_fitness_higher_throughput_higher_fitness(self, sandwich_world) -> None:
+        """Test that higher throughput = higher fitness."""
+        # Low throughput scenario
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state["sandwiches_completed"] = 5
+        tom.internal_state["quality_scores"] = [0.8] * 5
+        tom.internal_state["waste_count"] = 0
+        tom.internal_state["ingredients_used"] = 5
+        sandwich_world.tick = 100
+
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state["max_queue_depth"] = 0
+
+        low_throughput_fitness = tom_fitness(sandwich_world, "tom")
+
+        # High throughput scenario
+        tom.internal_state["sandwiches_completed"] = 20
+        tom.internal_state["quality_scores"] = [0.8] * 20
+        tom.internal_state["ingredients_used"] = 20
+
+        high_throughput_fitness = tom_fitness(sandwich_world, "tom")
+
+        assert high_throughput_fitness > low_throughput_fitness
+
+    def test_tom_fitness_high_waste_lower_fitness(self, sandwich_world) -> None:
+        """Test that high waste = lower fitness."""
+        # Low waste scenario
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state["sandwiches_completed"] = 10
+        tom.internal_state["quality_scores"] = [0.8] * 10
+        tom.internal_state["waste_count"] = 0
+        tom.internal_state["ingredients_used"] = 10
+        sandwich_world.tick = 100
+
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state["max_queue_depth"] = 0
+
+        low_waste_fitness = tom_fitness(sandwich_world, "tom")
+
+        # High waste scenario
+        tom.internal_state["waste_count"] = 10
+        tom.internal_state["ingredients_used"] = 20  # 10 sandwiches + 10 waste
+
+        high_waste_fitness = tom_fitness(sandwich_world, "tom")
+
+        assert low_waste_fitness > high_waste_fitness
+
+    def test_tom_fitness_handles_zero_ticks(self, sandwich_world) -> None:
+        """Test that tom_fitness handles zero ticks gracefully."""
+        sandwich_world.tick = 0
+
+        fitness = tom_fitness(sandwich_world, "tom")
+
+        assert fitness == 0.0
+
+    def test_tom_fitness_handles_empty_internal_state(self, sandwich_world) -> None:
+        """Test that tom_fitness handles empty internal state."""
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state.clear()
+        sandwich_world.tick = 100
+
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state.clear()
+
+        fitness = tom_fitness(sandwich_world, "tom")
+
+        # All metrics default to 0
+        assert fitness == 0.0
+
+    def test_tom_fitness_raises_for_missing_agent(self, sandwich_world) -> None:
+        """Test that tom_fitness raises error for missing agent."""
+        with pytest.raises(ValueError, match="not found"):
+            tom_fitness(sandwich_world, "nonexistent_agent")
+
+    def test_tom_fitness_integration_with_simulation(self, sandwich_world) -> None:
+        """Test tom_fitness with actual simulation run."""
+        # Run simulation for a bit
+        fitness = evaluate_fitness(
+            genome={"speed": 0.7, "consistency": 0.8, "waste_minimization": 0.5},
+            world_template=sandwich_world,
+            target_agent_id="tom",
+            ticks=500,
+            fitness_fn=tom_fitness,
+            seed=42,
+        )
+
+        # Fitness should be non-zero after simulation
+        assert isinstance(fitness, float)
+        # With realistic simulation, fitness will depend on sandwich production
+        # Could be negative due to queue penalties, but should be a valid number
+
+    def test_tom_fitness_formula_components(self, sandwich_world) -> None:
+        """Test that fitness formula combines all components correctly."""
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state["sandwiches_completed"] = 50
+        tom.internal_state["quality_scores"] = [0.9] * 50
+        tom.internal_state["waste_count"] = 5
+        tom.internal_state["ingredients_used"] = 55  # 50 + 5 waste
+        sandwich_world.tick = 1000
+
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state["max_queue_depth"] = 3
+
+        fitness = tom_fitness(sandwich_world, "tom")
+
+        # Manual calculation:
+        throughput = 50 / 1000  # = 0.05
+        avg_consistency = 0.9
+        waste_ratio = 5 / 55  # ≈ 0.0909
+        queue_penalty = 3 * 0.1  # = 0.3
+
+        expected = (throughput * avg_consistency) - waste_ratio - queue_penalty
+        # = (0.05 * 0.9) - 0.0909 - 0.3 = 0.045 - 0.0909 - 0.3 ≈ -0.346
+
+        assert abs(fitness - expected) < 0.001
