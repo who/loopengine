@@ -9,6 +9,11 @@ from loopengine.behaviors.config import (
     LLMProvider,
     get_llm_config,
 )
+from loopengine.behaviors.fallback import (
+    FallbackBehavior,
+    FallbackReason,
+    classify_error,
+)
 from loopengine.behaviors.llm_client import (
     BehaviorResponse,
     LLMClient,
@@ -31,6 +36,8 @@ __all__ = [
     "AgentContext",
     "BehaviorResponse",
     "DomainContext",
+    "FallbackBehavior",
+    "FallbackReason",
     "LLMClient",
     "LLMClientSettings",
     "LLMConfig",
@@ -39,5 +46,6 @@ __all__ = [
     "PromptBuilder",
     "ResponseParser",
     "ResponseParserError",
+    "classify_error",
     "get_llm_config",
 ]
