@@ -5,10 +5,15 @@ variables and .env files. API keys are secured by never being logged or
 exposed in error messages.
 """
 
+from __future__ import annotations
+
 import logging
 from enum import StrEnum
 from functools import lru_cache
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from loopengine.behaviors.rate_limiter import RateLimitConfig
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -104,6 +109,30 @@ class LLMConfig(BaseSettings):
         description="Cache duration in seconds (0 to disable)",
     )
 
+    # Rate limit handling settings
+    rate_limit_max_retries: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Maximum retry attempts on rate limit",
+    )
+    rate_limit_initial_wait: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=60.0,
+        description="Initial wait time before first retry (seconds)",
+    )
+    rate_limit_max_wait: float = Field(
+        default=60.0,
+        ge=1.0,
+        le=300.0,
+        description="Maximum wait time between retries (seconds)",
+    )
+    rate_limit_strategy: str = Field(
+        default="retry_with_backoff",
+        description="Rate limit strategy: retry_with_backoff, fallback_immediately",
+    )
+
     @field_validator("llm_provider", mode="before")
     @classmethod
     def normalize_provider(cls, v: Any) -> LLMProvider:
@@ -137,6 +166,22 @@ class LLMConfig(BaseSettings):
             raise ValueError("ANTHROPIC_API_KEY is required when LLM_PROVIDER is 'claude'")
         if self.llm_provider == LLMProvider.OPENAI and not self.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required when LLM_PROVIDER is 'openai'")
+
+    def get_rate_limit_config(self) -> RateLimitConfig:
+        """Create a RateLimitConfig from this config's rate limit settings.
+
+        Returns:
+            RateLimitConfig instance with current settings.
+        """
+        from loopengine.behaviors.rate_limiter import RateLimitConfig, RateLimitStrategy
+
+        strategy = RateLimitStrategy(self.rate_limit_strategy)
+        return RateLimitConfig(
+            strategy=strategy,
+            max_retries=self.rate_limit_max_retries,
+            initial_wait=self.rate_limit_initial_wait,
+            max_wait=self.rate_limit_max_wait,
+        )
 
     def __repr__(self) -> str:
         """Safe representation that never exposes API keys."""

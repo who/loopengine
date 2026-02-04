@@ -49,6 +49,16 @@ from loopengine.behaviors.prompt_builder import (
     DomainContext,
     PromptBuilder,
 )
+from loopengine.behaviors.rate_limiter import (
+    RateLimitConfig,
+    RateLimitError,
+    RateLimitEvent,
+    RateLimitExhaustedError,
+    RateLimitHandler,
+    RateLimitStrategy,
+    extract_retry_after,
+    is_rate_limit_exception,
+)
 from loopengine.behaviors.resource_extractor import (
     Resource,
     ResourceExtractor,
@@ -87,6 +97,12 @@ __all__ = [
     "LLMProvider",
     "LLMQuery",
     "PromptBuilder",
+    "RateLimitConfig",
+    "RateLimitError",
+    "RateLimitEvent",
+    "RateLimitExhaustedError",
+    "RateLimitHandler",
+    "RateLimitStrategy",
     "Resource",
     "ResourceExtractor",
     "ResourceExtractorError",
@@ -95,5 +111,7 @@ __all__ = [
     "ResponseParserError",
     "StoredDomain",
     "classify_error",
+    "extract_retry_after",
     "get_llm_config",
+    "is_rate_limit_exception",
 ]
