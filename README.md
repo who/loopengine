@@ -192,8 +192,38 @@ A software development team with typical tech company dynamics:
 ### Running Tests
 
 ```bash
-uv run pytest
+# Run all unit tests
+uv run pytest tests/ --ignore=tests/e2e
+
+# Run with verbose output
+uv run pytest tests/ --ignore=tests/e2e -v
 ```
+
+### End-to-End Tests
+
+E2E tests verify that backend and frontend start correctly and can communicate.
+
+```bash
+# Install Playwright browsers (first time only)
+uv run playwright install chromium
+
+# Start both servers (in separate terminals or background)
+uv run uvicorn loopengine.server.app:app --port 8000 &
+uv run python -m http.server 8080 &
+
+# Run e2e tests
+uv run pytest tests/e2e/ -v --browser chromium
+
+# Stop background servers when done
+pkill -f "uvicorn loopengine.server.app"
+pkill -f "http.server 8080"
+```
+
+The e2e tests verify:
+- Backend `/health` endpoint returns 200 with status "healthy"
+- Backend `/api/world` endpoint returns world state
+- Frontend loads with correct title and canvas element
+- Frontend connects to backend via WebSocket
 
 ### Linting and Formatting
 

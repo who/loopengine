@@ -29,6 +29,7 @@ dependencies = [
     "openai>=2.16.0",
     "httpx>=0.28.1",
     "tenacity>=9.1.2",
+    "websockets>=16.0",
 ]
 
 [project.scripts]
@@ -44,6 +45,7 @@ Issues = "https://github.com/loopengine/loopengine/issues"
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=7.0.0",
+    "pytest-playwright>=0.7.2",
     "ruff>=0.8.0",
 ]
 
