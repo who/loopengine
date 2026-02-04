@@ -38,6 +38,12 @@ from loopengine.behaviors.interaction_extractor import (
     InteractionExtractor,
     InteractionExtractorError,
 )
+from loopengine.behaviors.latency_tracker import (
+    AlertSeverity,
+    LatencyAlert,
+    LatencyTracker,
+    SlowQueryEvent,
+)
 from loopengine.behaviors.llm_client import (
     BehaviorResponse,
     LLMClient,
@@ -77,6 +83,7 @@ __all__ = [
     "AgentTypeExtractor",
     "AgentTypeExtractorError",
     "AgentTypeSchema",
+    "AlertSeverity",
     "BehaviorResponse",
     "DomainContext",
     "DomainMetadata",
@@ -96,6 +103,8 @@ __all__ = [
     "LLMConfig",
     "LLMProvider",
     "LLMQuery",
+    "LatencyAlert",
+    "LatencyTracker",
     "PromptBuilder",
     "RateLimitConfig",
     "RateLimitError",
@@ -109,6 +118,7 @@ __all__ = [
     "ResourceSchema",
     "ResponseParser",
     "ResponseParserError",
+    "SlowQueryEvent",
     "StoredDomain",
     "classify_error",
     "extract_retry_after",

@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from loopengine.api.behaviors import router as behaviors_router
 from loopengine.api.domains import router as domains_router
+from loopengine.api.metrics import router as metrics_router
 from loopengine.corpora.sandwich_shop import create_world
 from loopengine.engine.fitness import alex_fitness, maria_fitness, tom_fitness
 from loopengine.engine.ga import GAEngine
@@ -509,6 +510,7 @@ app = FastAPI(
 # Include routers
 app.include_router(behaviors_router)
 app.include_router(domains_router)
+app.include_router(metrics_router)
 
 
 # Pydantic models for REST responses

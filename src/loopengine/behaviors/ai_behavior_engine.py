@@ -15,6 +15,7 @@ from typing import Any
 
 from loopengine.behaviors.config import LLMConfig, LLMProvider, get_llm_config
 from loopengine.behaviors.fallback import FallbackBehavior, FallbackReason
+from loopengine.behaviors.latency_tracker import LatencyTracker
 from loopengine.behaviors.llm_client import BehaviorResponse, LLMClient, LLMQuery
 from loopengine.behaviors.prompt_builder import AgentContext, DomainContext, PromptBuilder
 from loopengine.behaviors.providers.claude import ClaudeClient
@@ -73,6 +74,7 @@ class AIBehaviorEngine:
         response_parser: ResponseParser | None = None,
         config: LLMConfig | None = None,
         fallback_behavior: FallbackBehavior | None = None,
+        latency_tracker: LatencyTracker | None = None,
     ) -> None:
         """Initialize the behavior engine with optional dependency injection.
 
@@ -86,12 +88,15 @@ class AIBehaviorEngine:
             config: LLM configuration. If not provided, loads from environment.
             fallback_behavior: Fallback behavior manager. If not provided,
                 creates a default one.
+            latency_tracker: Latency tracker for monitoring. If not provided,
+                creates a default one.
         """
         self._config = config or get_llm_config()
         self._prompt_builder = prompt_builder or PromptBuilder()
         self._response_parser = response_parser or ResponseParser()
         self._llm_client = llm_client or self._create_llm_client()
         self._fallback = fallback_behavior or FallbackBehavior()
+        self._latency_tracker = latency_tracker or LatencyTracker()
 
         # Initialize rate limit handler
         self._rate_limit_handler = RateLimitHandler(
@@ -266,6 +271,18 @@ class AIBehaviorEngine:
             with self._lock:
                 self._total_queries += 1
                 self._total_latency_ms += latency_ms
+
+            # Record latency with context for monitoring (NFR-001)
+            self._latency_tracker.record(
+                latency_ms=latency_ms,
+                agent_type=agent.agent_type,
+                domain_type=domain.domain_type,
+                context={
+                    "agent_id": agent_id,
+                    "fallback": response.metadata.get("fallback", False),
+                    "action": response.action,
+                },
+            )
 
             # Cache successful non-fallback responses
             if not response.metadata.get("fallback") and agent_id:
@@ -482,13 +499,15 @@ class AIBehaviorEngine:
 
         Returns:
             Dict with total_queries, total_latency_ms, avg_latency_ms,
-            rate_limit_events, concurrency stats, and rate limit handler stats.
+            rate_limit_events, concurrency stats, latency percentiles,
+            and rate limit handler stats.
         """
         with self._lock:
             avg_latency = (
                 self._total_latency_ms / self._total_queries if self._total_queries > 0 else 0.0
             )
             rate_limit_stats = self._rate_limit_handler.get_stats()
+            latency_stats = self._latency_tracker.get_stats()
             return {
                 "total_queries": self._total_queries,
                 "total_latency_ms": round(self._total_latency_ms, 2),
@@ -499,6 +518,14 @@ class AIBehaviorEngine:
                 "peak_concurrent_requests": self._peak_concurrent_requests,
                 "max_concurrent_limit": self._config.max_concurrent_requests,
                 "rate_limit_stats": rate_limit_stats,
+                # Latency percentiles from tracker (NFR-001 monitoring)
+                "p50_latency_ms": latency_stats["p50_latency_ms"],
+                "p95_latency_ms": latency_stats["p95_latency_ms"],
+                "p99_latency_ms": latency_stats["p99_latency_ms"],
+                "min_latency_ms": latency_stats["min_latency_ms"],
+                "max_latency_ms": latency_stats["max_latency_ms"],
+                "slow_query_count": latency_stats["slow_query_count"],
+                "slow_query_threshold_ms": latency_stats["slow_query_threshold_ms"],
             }
 
     def reset_metrics(self) -> None:
@@ -512,6 +539,7 @@ class AIBehaviorEngine:
             self._rate_limit_events = 0
             self._peak_concurrent_requests = 0
             self._rate_limit_handler.clear_events()
+        self._latency_tracker.reset()
 
     @property
     def rate_limit_handler(self) -> RateLimitHandler:
@@ -533,3 +561,8 @@ class AIBehaviorEngine:
     def max_concurrent_requests(self) -> int:
         """Get the configured maximum concurrent requests."""
         return self._config.max_concurrent_requests
+
+    @property
+    def latency_tracker(self) -> LatencyTracker:
+        """Get the latency tracker for monitoring and alerts."""
+        return self._latency_tracker
