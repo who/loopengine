@@ -17,6 +17,11 @@ from loopengine.behaviors.behavior_history import (
     BehaviorHistoryStore,
     StoredBehavior,
 )
+from loopengine.behaviors.cache_key_generator import (
+    CacheKeyGenerator,
+    generate_key,
+    get_default_generator,
+)
 from loopengine.behaviors.config import (
     LLMConfig,
     LLMProvider,
@@ -98,6 +103,7 @@ __all__ = [
     "BehaviorHistoryStore",
     "BehaviorResponse",
     "CacheEntry",
+    "CacheKeyGenerator",
     "ConstraintContext",
     "ConstraintSchema",
     "DomainContext",
@@ -138,6 +144,8 @@ __all__ = [
     "StoredDomain",
     "classify_error",
     "extract_retry_after",
+    "generate_key",
+    "get_default_generator",
     "get_llm_config",
     "is_rate_limit_exception",
 ]
