@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from loopengine.engine.fitness import tom_fitness
+from loopengine.engine.fitness import alex_fitness, tom_fitness
 from loopengine.engine.ga import FitnessEvaluator, GAEngine, GAStats, evaluate_fitness
 from loopengine.model.genome import GenomeSchema, GenomeTrait
 
@@ -1106,5 +1106,222 @@ class TestTomFitness:
 
         expected = (throughput * avg_consistency) - waste_ratio - queue_penalty
         # = (0.05 * 0.9) - 0.0909 - 0.3 = 0.045 - 0.0909 - 0.3 ≈ -0.346
+
+        assert abs(fitness - expected) < 0.001
+
+
+class TestAlexFitness:
+    """Test Alex's fitness function per PRD section 9.6."""
+
+    @pytest.fixture
+    def sandwich_world(self):
+        """Create a sandwich shop world for testing."""
+        from loopengine.corpora.sandwich_shop import create_world
+
+        return create_world()
+
+    def test_alex_fitness_counts_customers_served(self, sandwich_world) -> None:
+        """Test that alex_fitness counts customers_served from history."""
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state["customers_served"] = 20
+        alex.internal_state["total_orders"] = 20
+        alex.internal_state["accurate_orders"] = 20
+        alex.internal_state["customer_wait_times"] = [0] * 20
+        alex.internal_state["upsell_count"] = 0
+        sandwich_world.tick = 100
+
+        fitness = alex_fitness(sandwich_world, "alex")
+
+        # throughput = 20/100 = 0.2, accuracy = 20/20 = 1.0
+        # wait_penalty = 0 * 0.05 = 0, upsell_bonus = 0 * 0.1 = 0
+        # fitness = 0.2 * 1.0 - 0 + 0 = 0.2
+        assert abs(fitness - 0.2) < 0.001
+
+    def test_alex_fitness_computes_order_accuracy_rate(self, sandwich_world) -> None:
+        """Test that alex_fitness computes order_accuracy_rate."""
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state["customers_served"] = 10
+        alex.internal_state["total_orders"] = 10
+        alex.internal_state["accurate_orders"] = 8  # 80% accuracy
+        alex.internal_state["customer_wait_times"] = [0] * 10
+        alex.internal_state["upsell_count"] = 0
+        sandwich_world.tick = 100
+
+        fitness = alex_fitness(sandwich_world, "alex")
+
+        # throughput = 10/100 = 0.1, accuracy = 8/10 = 0.8
+        # fitness = 0.1 * 0.8 - 0 + 0 = 0.08
+        assert abs(fitness - 0.08) < 0.001
+
+    def test_alex_fitness_tracks_average_customer_wait_ticks(self, sandwich_world) -> None:
+        """Test that alex_fitness tracks average_customer_wait_ticks."""
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state["customers_served"] = 10
+        alex.internal_state["total_orders"] = 10
+        alex.internal_state["accurate_orders"] = 10
+        alex.internal_state["customer_wait_times"] = [20] * 10  # avg 20 ticks
+        alex.internal_state["upsell_count"] = 0
+        sandwich_world.tick = 100
+
+        fitness = alex_fitness(sandwich_world, "alex")
+
+        # throughput = 10/100 = 0.1, accuracy = 1.0
+        # wait_penalty = 20 * 0.05 = 1.0
+        # fitness = 0.1 * 1.0 - 1.0 + 0 = -0.9
+        assert abs(fitness - (-0.9)) < 0.001
+
+    def test_alex_fitness_counts_upsells(self, sandwich_world) -> None:
+        """Test that alex_fitness counts upsells."""
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state["customers_served"] = 10
+        alex.internal_state["total_orders"] = 10
+        alex.internal_state["accurate_orders"] = 10
+        alex.internal_state["customer_wait_times"] = [0] * 10
+        alex.internal_state["upsell_count"] = 5
+        sandwich_world.tick = 100
+
+        fitness = alex_fitness(sandwich_world, "alex")
+
+        # throughput = 10/100 = 0.1, accuracy = 1.0
+        # upsell_bonus = 5 * 0.1 = 0.5
+        # fitness = 0.1 * 1.0 - 0 + 0.5 = 0.6
+        assert abs(fitness - 0.6) < 0.001
+
+    def test_alex_fitness_returns_scalar(self, sandwich_world) -> None:
+        """Test that alex_fitness returns scalar fitness."""
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state["customers_served"] = 15
+        alex.internal_state["total_orders"] = 15
+        alex.internal_state["accurate_orders"] = 12
+        alex.internal_state["customer_wait_times"] = [10] * 15
+        alex.internal_state["upsell_count"] = 3
+        sandwich_world.tick = 200
+
+        fitness = alex_fitness(sandwich_world, "alex")
+
+        assert isinstance(fitness, float)
+
+    def test_alex_fitness_fast_service_higher_fitness(self, sandwich_world) -> None:
+        """Test that fast service = higher fitness."""
+        # Slow service scenario (long wait times)
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state["customers_served"] = 10
+        alex.internal_state["total_orders"] = 10
+        alex.internal_state["accurate_orders"] = 10
+        alex.internal_state["customer_wait_times"] = [50] * 10  # slow
+        alex.internal_state["upsell_count"] = 0
+        sandwich_world.tick = 100
+
+        slow_fitness = alex_fitness(sandwich_world, "alex")
+
+        # Fast service scenario (short wait times)
+        alex.internal_state["customer_wait_times"] = [5] * 10  # fast
+
+        fast_fitness = alex_fitness(sandwich_world, "alex")
+
+        assert fast_fitness > slow_fitness
+
+    def test_alex_fitness_long_waits_lower_fitness(self, sandwich_world) -> None:
+        """Test that long waits = lower fitness."""
+        # Short wait scenario
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state["customers_served"] = 10
+        alex.internal_state["total_orders"] = 10
+        alex.internal_state["accurate_orders"] = 10
+        alex.internal_state["customer_wait_times"] = [5] * 10
+        alex.internal_state["upsell_count"] = 0
+        sandwich_world.tick = 100
+
+        short_wait_fitness = alex_fitness(sandwich_world, "alex")
+
+        # Long wait scenario
+        alex.internal_state["customer_wait_times"] = [100] * 10
+
+        long_wait_fitness = alex_fitness(sandwich_world, "alex")
+
+        assert short_wait_fitness > long_wait_fitness
+
+    def test_alex_fitness_more_customers_higher_fitness(self, sandwich_world) -> None:
+        """Test that more customers = higher fitness."""
+        # Few customers scenario
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state["customers_served"] = 5
+        alex.internal_state["total_orders"] = 5
+        alex.internal_state["accurate_orders"] = 5
+        alex.internal_state["customer_wait_times"] = [0] * 5
+        alex.internal_state["upsell_count"] = 0
+        sandwich_world.tick = 100
+
+        few_customers_fitness = alex_fitness(sandwich_world, "alex")
+
+        # Many customers scenario
+        alex.internal_state["customers_served"] = 20
+        alex.internal_state["total_orders"] = 20
+        alex.internal_state["accurate_orders"] = 20
+        alex.internal_state["customer_wait_times"] = [0] * 20
+
+        many_customers_fitness = alex_fitness(sandwich_world, "alex")
+
+        assert many_customers_fitness > few_customers_fitness
+
+    def test_alex_fitness_handles_zero_ticks(self, sandwich_world) -> None:
+        """Test that alex_fitness handles zero ticks gracefully."""
+        sandwich_world.tick = 0
+
+        fitness = alex_fitness(sandwich_world, "alex")
+
+        assert fitness == 0.0
+
+    def test_alex_fitness_handles_empty_internal_state(self, sandwich_world) -> None:
+        """Test that alex_fitness handles empty internal state."""
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state.clear()
+        sandwich_world.tick = 100
+
+        fitness = alex_fitness(sandwich_world, "alex")
+
+        # All metrics default to 0
+        assert fitness == 0.0
+
+    def test_alex_fitness_raises_for_missing_agent(self, sandwich_world) -> None:
+        """Test that alex_fitness raises error for missing agent."""
+        with pytest.raises(ValueError, match="not found"):
+            alex_fitness(sandwich_world, "nonexistent_agent")
+
+    def test_alex_fitness_integration_with_simulation(self, sandwich_world) -> None:
+        """Test alex_fitness with actual simulation run."""
+        fitness = evaluate_fitness(
+            genome={"speed": 0.8, "accuracy": 0.7, "upselling": 0.5},
+            world_template=sandwich_world,
+            target_agent_id="alex",
+            ticks=500,
+            fitness_fn=alex_fitness,
+            seed=42,
+        )
+
+        # Fitness should be a valid number after simulation
+        assert isinstance(fitness, float)
+
+    def test_alex_fitness_formula_components(self, sandwich_world) -> None:
+        """Test that fitness formula combines all components correctly."""
+        alex = sandwich_world.agents["alex"]
+        alex.internal_state["customers_served"] = 30
+        alex.internal_state["total_orders"] = 30
+        alex.internal_state["accurate_orders"] = 27  # 90% accuracy
+        alex.internal_state["customer_wait_times"] = [10] * 30  # avg 10 ticks wait
+        alex.internal_state["upsell_count"] = 6
+        sandwich_world.tick = 500
+
+        fitness = alex_fitness(sandwich_world, "alex")
+
+        # Manual calculation:
+        throughput = 30 / 500  # = 0.06
+        accuracy = 27 / 30  # = 0.9
+        avg_wait = 10
+        wait_penalty = avg_wait * 0.05  # = 0.5
+        upsell_bonus = 6 * 0.1  # = 0.6
+
+        expected = (throughput * accuracy) - wait_penalty + upsell_bonus
+        # = (0.06 * 0.9) - 0.5 + 0.6 = 0.054 - 0.5 + 0.6 = 0.154
 
         assert abs(fitness - expected) < 0.001

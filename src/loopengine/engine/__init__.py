@@ -6,7 +6,7 @@ from loopengine.engine.ai_policy import (
     create_ai_policy_for_agent,
     enable_ai_behaviors,
 )
-from loopengine.engine.fitness import tom_fitness
+from loopengine.engine.fitness import alex_fitness, tom_fitness
 from loopengine.engine.forces import (
     ForceConfig,
     apply_forces,
@@ -24,6 +24,7 @@ __all__ = [
     "ForceConfig",
     "GAEngine",
     "GAStats",
+    "alex_fitness",
     "apply_forces",
     "compute_forces",
     "create_ai_policy_for_agent",

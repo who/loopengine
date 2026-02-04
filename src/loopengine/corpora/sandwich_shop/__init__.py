@@ -408,8 +408,30 @@ def alex_policy(
     if "max_queue_depth" not in internal_state:
         internal_state["max_queue_depth"] = 0
 
+    # Initialize fitness tracking metrics for alex_fitness
+    if "customers_served" not in internal_state:
+        internal_state["customers_served"] = 0
+    if "total_orders" not in internal_state:
+        internal_state["total_orders"] = 0
+    if "accurate_orders" not in internal_state:
+        internal_state["accurate_orders"] = 0
+    if "customer_wait_times" not in internal_state:
+        internal_state["customer_wait_times"] = []
+    if "customer_arrival_ticks" not in internal_state:
+        internal_state["customer_arrival_ticks"] = {}
+    if "upsell_count" not in internal_state:
+        internal_state["upsell_count"] = 0
+
+    current_tick = internal_state.get("tick", 0)
+
     for particle in sensed_inputs:
         if particle.particle_type == "customer_order":
+            # Track order for fitness
+            internal_state["total_orders"] += 1
+
+            # Record arrival tick for wait time tracking
+            internal_state["customer_arrival_ticks"][particle.id] = current_tick
+
             # Create order ticket for Tom
             outputs.append(
                 Particle(
@@ -428,10 +450,34 @@ def alex_policy(
             if current_depth > internal_state["max_queue_depth"]:
                 internal_state["max_queue_depth"] = current_depth
 
+            # Attempt upsell based on upselling genome trait
+            upselling_skill = genome.get("upselling", 0.5)
+            # Use internal random function if available, otherwise skip randomness
+            random_fn = internal_state.get("random", lambda: 0.5)
+            if random_fn() < upselling_skill * 0.3:  # Upsell chance scales with trait
+                internal_state["upsell_count"] += 1
+
         elif particle.particle_type == "finished_sandwich":
             # Match sandwich to waiting customer
             if internal_state["waiting_customers"]:
                 customer_id = internal_state["waiting_customers"].pop(0)
+
+                # Track customer wait time
+                arrival_tick = internal_state["customer_arrival_ticks"].pop(
+                    customer_id, current_tick
+                )
+                wait_time = current_tick - arrival_tick
+                internal_state["customer_wait_times"].append(wait_time)
+
+                # Track customers served for fitness
+                internal_state["customers_served"] += 1
+
+                # Check order accuracy based on accuracy genome trait
+                accuracy_skill = genome.get("accuracy", 0.7)
+                random_fn = internal_state.get("random", lambda: 0.5)
+                if random_fn() < accuracy_skill:
+                    internal_state["accurate_orders"] += 1
+
                 # Serve customer
                 outputs.append(
                     Particle(

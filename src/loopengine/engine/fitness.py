@@ -81,3 +81,65 @@ def tom_fitness(world: World, agent_id: str) -> float:
     fitness = (throughput * avg_consistency) - waste_ratio - (max_queue_depth * 0.1)
 
     return fitness
+
+
+def alex_fitness(world: World, agent_id: str) -> float:
+    """Compute fitness for Alex (cashier role) per PRD section 9.6.
+
+    Fitness formula:
+        fitness = (customers_served / ticks_elapsed)  # throughput
+                * order_accuracy_rate                  # quality
+                - (average_customer_wait_ticks * 0.05) # speed penalty
+                + (upsell_count * 0.1)                 # bonus revenue
+
+    The function reads metrics from agent internal_state that are tracked
+    during simulation by alex_policy.
+
+    Args:
+        world: World state after simulation.
+        agent_id: ID of the agent to evaluate (should be Alex).
+
+    Returns:
+        float: Scalar fitness value (higher is better).
+
+    Raises:
+        ValueError: If agent not found in world.
+    """
+    if agent_id not in world.agents:
+        msg = f"Agent '{agent_id}' not found in world"
+        raise ValueError(msg)
+
+    agent = world.agents[agent_id]
+    internal_state = agent.internal_state
+    ticks_elapsed = world.tick
+
+    # Avoid division by zero
+    if ticks_elapsed == 0:
+        return 0.0
+
+    # Get metrics from Alex's internal_state (tracked by alex_policy)
+    customers_served = internal_state.get("customers_served", 0)
+    total_orders = internal_state.get("total_orders", 0)
+    accurate_orders = internal_state.get("accurate_orders", 0)
+    customer_wait_times = internal_state.get("customer_wait_times", [])
+    upsell_count = internal_state.get("upsell_count", 0)
+
+    # Compute throughput: customers served per tick
+    throughput = customers_served / ticks_elapsed
+
+    # Compute order accuracy rate
+    if total_orders > 0:
+        order_accuracy_rate = accurate_orders / total_orders
+    else:
+        order_accuracy_rate = 0.0
+
+    # Compute average customer wait time
+    if customer_wait_times:
+        avg_wait_time = sum(customer_wait_times) / len(customer_wait_times)
+    else:
+        avg_wait_time = 0.0
+
+    # Compute fitness per PRD formula
+    fitness = (throughput * order_accuracy_rate) - (avg_wait_time * 0.05) + (upsell_count * 0.1)
+
+    return fitness
