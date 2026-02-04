@@ -3,6 +3,8 @@
  *
  * Connects to the LoopEngine server via WebSocket and renders
  * the simulation frame data on an HTML5 Canvas.
+ *
+ * Uses LoopEngineRenderer for frame interpolation and layer-ordered rendering.
  */
 
 (function() {
@@ -12,6 +14,7 @@
     const WS_FRAMES_URL = 'ws://localhost:8000/ws/frames';
     const WS_CONTROL_URL = 'ws://localhost:8000/ws/control';
     const RECONNECT_DELAY_MS = 3000;
+    const SERVER_FRAME_RATE = 30;  // Expected server frame rate for interpolation
 
     // State
     let canvas = null;
@@ -23,13 +26,6 @@
     let connected = false;
     let animationTime = 0;
     let lastTimestamp = 0;
-
-    // Viewport state for pan/zoom
-    let viewport = {
-        scale: 1.0,
-        offsetX: 0,
-        offsetY: 0
-    };
 
     /**
      * Initialize the canvas and start the application.
@@ -96,6 +92,12 @@
                 try {
                     const frame = JSON.parse(event.data);
                     latestFrame = frame;
+
+                    // Push frame to renderer for interpolation
+                    if (typeof LoopEngineRenderer !== 'undefined') {
+                        LoopEngineRenderer.pushFrame(frame);
+                    }
+
                     console.log('Frame received:', 'tick=' + frame.tick,
                                 'agents=' + frame.agents.length,
                                 'links=' + frame.links.length,
@@ -200,6 +202,21 @@
         const width = canvas._logicalWidth || canvas.width;
         const height = canvas._logicalHeight || canvas.height;
 
+        // Use LoopEngineRenderer if available for interpolated rendering
+        if (typeof LoopEngineRenderer !== 'undefined') {
+            LoopEngineRenderer.render(
+                ctx,
+                performance.now(),
+                animationTime,
+                width,
+                height,
+                connected,
+                SERVER_FRAME_RATE
+            );
+            return;
+        }
+
+        // Fallback: direct rendering without interpolation
         // Clear canvas
         ctx.fillStyle = '#1a1a2e';
         ctx.fillRect(0, 0, width, height);
