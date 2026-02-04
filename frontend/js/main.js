@@ -21,6 +21,15 @@
     let latestFrame = null;
     let animationFrameId = null;
     let connected = false;
+    let animationTime = 0;
+    let lastTimestamp = 0;
+
+    // Viewport state for pan/zoom
+    let viewport = {
+        scale: 1.0,
+        offsetX: 0,
+        offsetY: 0
+    };
 
     /**
      * Initialize the canvas and start the application.
@@ -169,7 +178,15 @@
      * Start the requestAnimationFrame render loop.
      */
     function startRenderLoop() {
-        function loop() {
+        function loop(timestamp) {
+            // Calculate delta time for animations
+            if (lastTimestamp === 0) {
+                lastTimestamp = timestamp;
+            }
+            const deltaTime = (timestamp - lastTimestamp) / 1000;
+            lastTimestamp = timestamp;
+            animationTime += deltaTime;
+
             render();
             animationFrameId = requestAnimationFrame(loop);
         }
@@ -214,21 +231,53 @@
      * @param {number} height - Canvas height
      */
     function drawFrame(frame, width, height) {
-        // Draw tick/time info
+        // Update viewport to center agents if not yet positioned
+        if (viewport.offsetX === 0 && viewport.offsetY === 0 && frame.agents.length > 0) {
+            // Calculate bounding box of all agents
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (const agent of frame.agents) {
+                minX = Math.min(minX, agent.x);
+                minY = Math.min(minY, agent.y);
+                maxX = Math.max(maxX, agent.x);
+                maxY = Math.max(maxY, agent.y);
+            }
+
+            // Center the viewport on agents
+            const contentWidth = maxX - minX + 100;
+            const contentHeight = maxY - minY + 100;
+
+            // Scale to fit with padding
+            viewport.scale = Math.min(
+                (width - 100) / contentWidth,
+                (height - 100) / contentHeight,
+                2.0  // Max scale
+            );
+            viewport.scale = Math.max(viewport.scale, 0.25);  // Min scale
+
+            // Center offset
+            const centerX = (minX + maxX) / 2;
+            const centerY = (minY + maxY) / 2;
+            viewport.offsetX = width / 2 - centerX * viewport.scale;
+            viewport.offsetY = height / 2 - centerY * viewport.scale;
+        }
+
+        // Draw agents using the agents module
+        if (typeof LoopEngineAgents !== 'undefined') {
+            LoopEngineAgents.renderAgents(ctx, frame.agents, animationTime, viewport);
+        }
+
+        // Draw tick/time info (overlay)
         ctx.fillStyle = '#666666';
         ctx.font = '12px monospace';
         ctx.textAlign = 'left';
         ctx.fillText('Tick: ' + frame.tick + ' | Time: ' + frame.time.toFixed(2) + 's', 10, 20);
 
-        // Placeholder rendering - will be expanded in future issues
-        // For now, just indicate we're receiving data
-        ctx.fillStyle = '#4a90d9';
-        ctx.font = '14px monospace';
-        ctx.textAlign = 'center';
+        // Draw stats
         ctx.fillText(
-            'Receiving frame data: ' + frame.agents.length + ' agents, ' +
-            frame.links.length + ' links, ' + frame.particles.length + ' particles',
-            width / 2, height / 2
+            'Agents: ' + frame.agents.length +
+            ' | Links: ' + frame.links.length +
+            ' | Particles: ' + frame.particles.length,
+            10, 36
         );
     }
 
