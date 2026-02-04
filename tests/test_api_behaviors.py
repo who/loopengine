@@ -894,3 +894,319 @@ class TestGetCacheEndpoint:
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
         assert data["entries"] == []
+
+
+class TestPinBehaviorEndpoint:
+    """Tests for the POST /api/v1/behaviors/pin endpoint."""
+
+    def test_pin_behavior_success(self, client: TestClient, tmp_path: Path) -> None:
+        """Test successfully pinning a behavior."""
+        from loopengine.behaviors import BehaviorPinStore
+
+        pin_store = BehaviorPinStore(storage_dir=tmp_path / "pins")
+
+        with patch("loopengine.api.behaviors._get_pin_store", return_value=pin_store):
+            response = client.post(
+                "/api/v1/behaviors/pin",
+                json={
+                    "domain_id": "shop",
+                    "agent_type": "employee",
+                    "context": {"task": "greet"},
+                    "behavior": {
+                        "action": "say_hello",
+                        "parameters": {"greeting": "Welcome!"},
+                        "reasoning": "Customer just entered",
+                    },
+                    "reason": "Default greeting behavior",
+                },
+            )
+
+        assert response.status_code == status.HTTP_201_CREATED
+        data = response.json()
+        assert data["pin_id"].startswith("pin-")
+        assert data["domain_id"] == "shop"
+        assert data["agent_type"] == "employee"
+        assert "pinned_at" in data
+        assert data["message"] == f"Behavior pinned successfully with ID {data['pin_id']}"
+
+    def test_pin_behavior_without_reason(self, client: TestClient, tmp_path: Path) -> None:
+        """Test pinning a behavior without providing a reason."""
+        from loopengine.behaviors import BehaviorPinStore
+
+        pin_store = BehaviorPinStore(storage_dir=tmp_path / "pins")
+
+        with patch("loopengine.api.behaviors._get_pin_store", return_value=pin_store):
+            response = client.post(
+                "/api/v1/behaviors/pin",
+                json={
+                    "domain_id": "shop",
+                    "agent_type": "employee",
+                    "context": {},
+                    "behavior": {
+                        "action": "wait",
+                        "parameters": {},
+                        "reasoning": "Nothing to do",
+                    },
+                },
+            )
+
+        assert response.status_code == status.HTTP_201_CREATED
+        data = response.json()
+        assert data["pin_id"].startswith("pin-")
+
+    def test_pin_behavior_duplicate_updates(self, client: TestClient, tmp_path: Path) -> None:
+        """Test that pinning the same context again updates the behavior (idempotent)."""
+        from loopengine.behaviors import BehaviorPinStore
+
+        pin_store = BehaviorPinStore(storage_dir=tmp_path / "pins")
+
+        with patch("loopengine.api.behaviors._get_pin_store", return_value=pin_store):
+            # First pin
+            response1 = client.post(
+                "/api/v1/behaviors/pin",
+                json={
+                    "domain_id": "shop",
+                    "agent_type": "employee",
+                    "context": {"task": "greet"},
+                    "behavior": {
+                        "action": "say_hello",
+                        "parameters": {},
+                        "reasoning": "First version",
+                    },
+                },
+            )
+            assert response1.status_code == status.HTTP_201_CREATED
+            pin_id1 = response1.json()["pin_id"]
+
+            # Second pin with same context but different behavior
+            response2 = client.post(
+                "/api/v1/behaviors/pin",
+                json={
+                    "domain_id": "shop",
+                    "agent_type": "employee",
+                    "context": {"task": "greet"},
+                    "behavior": {
+                        "action": "wave",
+                        "parameters": {},
+                        "reasoning": "Updated version",
+                    },
+                },
+            )
+            assert response2.status_code == status.HTTP_201_CREATED
+            pin_id2 = response2.json()["pin_id"]
+
+            # Same pin ID (updated, not duplicated)
+            assert pin_id1 == pin_id2
+
+            # Verify the behavior was actually updated
+            pinned = pin_store.get_by_id(pin_id2)
+            assert pinned is not None
+            assert pinned.behavior.action == "wave"
+            assert pinned.behavior.reasoning == "Updated version"
+
+    def test_pin_behavior_stored_correctly(self, client: TestClient, tmp_path: Path) -> None:
+        """Test that pinned behavior is stored and retrievable."""
+        from loopengine.behaviors import BehaviorPinStore
+
+        pin_store = BehaviorPinStore(storage_dir=tmp_path / "pins")
+
+        with patch("loopengine.api.behaviors._get_pin_store", return_value=pin_store):
+            response = client.post(
+                "/api/v1/behaviors/pin",
+                json={
+                    "domain_id": "restaurant",
+                    "agent_type": "waiter",
+                    "context": {"table": 5, "status": "seated"},
+                    "behavior": {
+                        "action": "bring_menu",
+                        "parameters": {"menu_type": "dinner"},
+                        "reasoning": "New customers need menus",
+                    },
+                    "reason": "Standard service flow",
+                },
+            )
+
+        assert response.status_code == status.HTTP_201_CREATED
+        pin_id = response.json()["pin_id"]
+
+        # Verify stored correctly
+        pinned = pin_store.get_by_id(pin_id)
+        assert pinned is not None
+        assert pinned.domain_id == "restaurant"
+        assert pinned.agent_type == "waiter"
+        assert pinned.context == {"table": 5, "status": "seated"}
+        assert pinned.behavior.action == "bring_menu"
+        assert pinned.behavior.parameters == {"menu_type": "dinner"}
+        assert pinned.behavior.reasoning == "New customers need menus"
+        assert pinned.reason == "Standard service flow"
+
+    def test_pin_behavior_invalid_domain_id_chars(self, client: TestClient, tmp_path: Path) -> None:
+        """Test that invalid domain_id characters return 400."""
+        from loopengine.behaviors import BehaviorPinStore
+
+        pin_store = BehaviorPinStore(storage_dir=tmp_path / "pins")
+
+        with patch("loopengine.api.behaviors._get_pin_store", return_value=pin_store):
+            response = client.post(
+                "/api/v1/behaviors/pin",
+                json={
+                    "domain_id": "shop/../../etc",
+                    "agent_type": "employee",
+                    "context": {},
+                    "behavior": {
+                        "action": "test",
+                        "parameters": {},
+                        "reasoning": "",
+                    },
+                },
+            )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert "invalid" in response.json()["detail"].lower()
+
+    def test_pin_behavior_empty_domain_id(self, client: TestClient) -> None:
+        """Test that empty domain_id returns 422."""
+        response = client.post(
+            "/api/v1/behaviors/pin",
+            json={
+                "domain_id": "",
+                "agent_type": "employee",
+                "context": {},
+                "behavior": {
+                    "action": "test",
+                    "parameters": {},
+                    "reasoning": "",
+                },
+            },
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    def test_pin_behavior_whitespace_domain_id(self, client: TestClient) -> None:
+        """Test that whitespace-only domain_id returns 422."""
+        response = client.post(
+            "/api/v1/behaviors/pin",
+            json={
+                "domain_id": "   ",
+                "agent_type": "employee",
+                "context": {},
+                "behavior": {
+                    "action": "test",
+                    "parameters": {},
+                    "reasoning": "",
+                },
+            },
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    def test_pin_behavior_empty_agent_type(self, client: TestClient) -> None:
+        """Test that empty agent_type returns 422."""
+        response = client.post(
+            "/api/v1/behaviors/pin",
+            json={
+                "domain_id": "shop",
+                "agent_type": "",
+                "context": {},
+                "behavior": {
+                    "action": "test",
+                    "parameters": {},
+                    "reasoning": "",
+                },
+            },
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    def test_pin_behavior_empty_action(self, client: TestClient) -> None:
+        """Test that empty behavior action returns 422."""
+        response = client.post(
+            "/api/v1/behaviors/pin",
+            json={
+                "domain_id": "shop",
+                "agent_type": "employee",
+                "context": {},
+                "behavior": {
+                    "action": "",
+                    "parameters": {},
+                    "reasoning": "",
+                },
+            },
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    def test_pin_behavior_missing_behavior(self, client: TestClient) -> None:
+        """Test that missing behavior field returns 422."""
+        response = client.post(
+            "/api/v1/behaviors/pin",
+            json={
+                "domain_id": "shop",
+                "agent_type": "employee",
+                "context": {},
+            },
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    def test_pin_behavior_minimal_valid_request(self, client: TestClient, tmp_path: Path) -> None:
+        """Test pinning with minimal required fields."""
+        from loopengine.behaviors import BehaviorPinStore
+
+        pin_store = BehaviorPinStore(storage_dir=tmp_path / "pins")
+
+        with patch("loopengine.api.behaviors._get_pin_store", return_value=pin_store):
+            response = client.post(
+                "/api/v1/behaviors/pin",
+                json={
+                    "domain_id": "shop",
+                    "agent_type": "employee",
+                    "behavior": {
+                        "action": "wait",
+                    },
+                },
+            )
+
+        assert response.status_code == status.HTTP_201_CREATED
+        data = response.json()
+        assert data["pin_id"].startswith("pin-")
+
+        # Verify defaults were applied
+        pinned = pin_store.get_by_id(data["pin_id"])
+        assert pinned is not None
+        assert pinned.context == {}
+        assert pinned.behavior.parameters == {}
+        assert pinned.behavior.reasoning == ""
+
+    def test_pinned_behavior_used_in_generate(
+        self, client: TestClient, tmp_path: Path, sample_schema: DomainSchema
+    ) -> None:
+        """Test that pinned behavior is used in subsequent generate calls."""
+        from loopengine.behaviors import BehaviorPinStore
+
+        pin_store = BehaviorPinStore(storage_dir=tmp_path / "pins")
+        domain_store = DomainStore(storage_dir=tmp_path / "domains")
+        domain_store.save("shop", sample_schema)
+
+        # Pin a behavior
+        with patch("loopengine.api.behaviors._get_pin_store", return_value=pin_store):
+            pin_response = client.post(
+                "/api/v1/behaviors/pin",
+                json={
+                    "domain_id": "shop",
+                    "agent_type": "customer",
+                    "context": {"waiting": True},
+                    "behavior": {
+                        "action": "wait_patiently",
+                        "parameters": {"patience_level": "high"},
+                        "reasoning": "Customer is known to be patient",
+                    },
+                    "reason": "VIP customer preference",
+                },
+            )
+        assert pin_response.status_code == status.HTTP_201_CREATED
+
+        # Verify pin store has the behavior
+        pinned = pin_store.get_behavior("shop", "customer", {"waiting": True})
+        assert pinned is not None
+        assert pinned.action == "wait_patiently"

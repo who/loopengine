@@ -18,6 +18,9 @@ from loopengine.behaviors import (
     AIBehaviorEngineError,
     BehaviorCache,
     BehaviorHistoryStore,
+    BehaviorPinStore,
+    BehaviorPinStoreError,
+    BehaviorResponse,
     DomainStore,
     DomainStoreError,
     StoredBehavior,
@@ -108,6 +111,7 @@ class GenerateBehaviorResponse(BaseModel):
 _engine: AIBehaviorEngine | None = None
 _history_store: BehaviorHistoryStore | None = None
 _behavior_cache: BehaviorCache | None = None
+_pin_store: BehaviorPinStore | None = None
 
 
 def _get_engine() -> AIBehaviorEngine:
@@ -173,6 +177,28 @@ def set_behavior_cache(cache: BehaviorCache) -> None:
     """
     global _behavior_cache
     _behavior_cache = cache
+
+
+def _get_pin_store() -> BehaviorPinStore:
+    """Get or create a BehaviorPinStore instance.
+
+    Returns:
+        BehaviorPinStore instance.
+    """
+    global _pin_store
+    if _pin_store is None:
+        _pin_store = BehaviorPinStore()
+    return _pin_store
+
+
+def set_pin_store(store: BehaviorPinStore) -> None:
+    """Set the pin store instance (for testing).
+
+    Args:
+        store: BehaviorPinStore instance to use.
+    """
+    global _pin_store
+    _pin_store = store
 
 
 def _find_agent_type_in_schema(
@@ -808,4 +834,156 @@ async def get_cache(
         entries=entries,
         total_entries=stats_dict["size"],
         stats=stats,
+    )
+
+
+# ============================================================================
+# Behavior Pinning Endpoints
+# ============================================================================
+
+
+class BehaviorData(BaseModel):
+    """Behavior data for pinning.
+
+    Attributes:
+        action: The action the agent should take.
+        parameters: Parameters for the action.
+        reasoning: Brief explanation of why this action was chosen.
+    """
+
+    action: str = Field(description="The action the agent should take", min_length=1)
+    parameters: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Parameters for the action",
+    )
+    reasoning: str = Field(default="", description="Explanation of why this action was chosen")
+
+
+class PinBehaviorRequest(BaseModel):
+    """Request body for pinning a behavior.
+
+    Attributes:
+        domain_id: ID of the domain this behavior belongs to.
+        agent_type: Type of agent this behavior is for.
+        context: Agent context that triggers this behavior.
+        behavior: The behavior to pin.
+        reason: Optional reason for pinning this behavior.
+    """
+
+    domain_id: str = Field(description="ID of the domain configuration", min_length=1)
+    agent_type: str = Field(description="Type of agent", min_length=1)
+    context: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Agent context that triggers this behavior",
+    )
+    behavior: BehaviorData = Field(description="The behavior to pin")
+    reason: str = Field(default="", description="Optional reason for pinning")
+
+    @field_validator("domain_id")
+    @classmethod
+    def domain_id_not_empty(cls, v: str) -> str:
+        """Validate domain_id is not just whitespace."""
+        if not v or not v.strip():
+            raise ValueError("domain_id cannot be empty or whitespace only")
+        return v.strip()
+
+    @field_validator("agent_type")
+    @classmethod
+    def agent_type_not_empty(cls, v: str) -> str:
+        """Validate agent_type is not just whitespace."""
+        if not v or not v.strip():
+            raise ValueError("agent_type cannot be empty or whitespace only")
+        return v.strip()
+
+
+class PinBehaviorResponse(BaseModel):
+    """Response body for pinning a behavior.
+
+    Attributes:
+        pin_id: Unique identifier for the created pin.
+        domain_id: Domain the behavior belongs to.
+        agent_type: Type of agent.
+        pinned_at: ISO timestamp when the behavior was pinned.
+        message: Confirmation message.
+    """
+
+    pin_id: str = Field(description="Unique identifier for the pin")
+    domain_id: str = Field(description="Domain the behavior belongs to")
+    agent_type: str = Field(description="Type of agent")
+    pinned_at: str = Field(description="ISO timestamp when pinned")
+    message: str = Field(description="Confirmation message")
+
+
+@router.post(
+    "/pin",
+    response_model=PinBehaviorResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        201: {"description": "Behavior pinned successfully"},
+        200: {"description": "Behavior updated (already pinned for this context)"},
+        400: {"description": "Invalid request - invalid behavior schema or domain_id"},
+    },
+)
+async def pin_behavior(
+    request: PinBehaviorRequest,
+) -> PinBehaviorResponse:
+    """Pin a behavior so it won't be regenerated.
+
+    Creates a pinned behavior entry that takes priority over fresh LLM responses.
+    Pinned behaviors persist across cache clears and server restarts.
+
+    If a pin already exists for the same domain/agent_type/context combination,
+    the behavior will be updated (idempotent).
+
+    Args:
+        request: Request containing domain_id, agent_type, context, behavior, and reason.
+
+    Returns:
+        PinBehaviorResponse with pin_id and confirmation.
+
+    Raises:
+        HTTPException: 400 if domain_id contains invalid characters.
+    """
+    pin_store = _get_pin_store()
+
+    # Convert BehaviorData to BehaviorResponse for the pin store
+    behavior_response = BehaviorResponse(
+        action=request.behavior.action,
+        parameters=request.behavior.parameters,
+        reasoning=request.behavior.reasoning,
+        metadata={"pinned": True},
+    )
+
+    try:
+        pin_id = pin_store.pin(
+            domain_id=request.domain_id,
+            agent_type=request.agent_type,
+            context=request.context,
+            behavior=behavior_response,
+            reason=request.reason,
+        )
+    except BehaviorPinStoreError as e:
+        logger.warning("Failed to pin behavior: %s", str(e))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
+
+    # Get the pinned behavior to retrieve the timestamp
+    pinned = pin_store.get_by_id(pin_id)
+    pinned_at = pinned.pinned_at if pinned else ""
+
+    logger.info(
+        "Pinned behavior %s for %s/%s",
+        pin_id,
+        request.domain_id,
+        request.agent_type,
+    )
+
+    return PinBehaviorResponse(
+        pin_id=pin_id,
+        domain_id=request.domain_id,
+        agent_type=request.agent_type,
+        pinned_at=pinned_at,
+        message=f"Behavior pinned successfully with ID {pin_id}",
     )
