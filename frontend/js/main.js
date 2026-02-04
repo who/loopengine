@@ -261,12 +261,17 @@
             viewport.offsetY = height / 2 - centerY * viewport.scale;
         }
 
-        // Draw links using the links module (underneath agents)
+        // Draw links using the links module (underneath agents and particles)
         if (typeof LoopEngineLinks !== 'undefined') {
             LoopEngineLinks.renderLinks(ctx, frame.links, animationTime, viewport);
         }
 
-        // Draw agents using the agents module
+        // Draw particles using the particles module (on top of links, below agents)
+        if (typeof LoopEngineParticles !== 'undefined') {
+            LoopEngineParticles.renderParticles(ctx, frame.particles, frame.links, animationTime, viewport);
+        }
+
+        // Draw agents using the agents module (on top of everything)
         if (typeof LoopEngineAgents !== 'undefined') {
             LoopEngineAgents.renderAgents(ctx, frame.agents, animationTime, viewport);
         }
