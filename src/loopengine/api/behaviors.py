@@ -987,3 +987,66 @@ async def pin_behavior(
         pinned_at=pinned_at,
         message=f"Behavior pinned successfully with ID {pin_id}",
     )
+
+
+# ============================================================================
+# Cache Invalidation Endpoint
+# ============================================================================
+
+
+class ClearCacheResponse(BaseModel):
+    """Response body for cache clearing operation.
+
+    Attributes:
+        cleared_count: Number of cache entries cleared.
+        domain_id: Domain ID that was cleared, if domain-scoped.
+        message: Confirmation message.
+    """
+
+    cleared_count: int = Field(description="Number of cache entries cleared")
+    domain_id: str | None = Field(default=None, description="Domain ID cleared (if scoped)")
+    message: str = Field(description="Confirmation message")
+
+
+@router.delete(
+    "/cache",
+    response_model=ClearCacheResponse,
+    responses={
+        200: {"description": "Cache cleared successfully"},
+    },
+)
+async def clear_cache(
+    domain_id: str | None = Query(default=None, description="Clear only this domain's cache"),
+) -> ClearCacheResponse:
+    """Clear behavior cache entries.
+
+    By default, clears the entire cache. If domain_id is provided, clears only
+    entries for that domain.
+
+    Note: Pinned behaviors are stored separately and are not affected by this
+    operation. Use the unpin endpoint to remove pinned behaviors.
+
+    Args:
+        domain_id: Optional domain ID to clear. If not provided, clears all.
+
+    Returns:
+        ClearCacheResponse with count of cleared entries.
+    """
+    cache = _get_behavior_cache()
+
+    if domain_id:
+        # Clear domain-scoped entries
+        cleared_count = cache.clear_domain(domain_id)
+        message = f"Cleared {cleared_count} cache entries for domain '{domain_id}'"
+        logger.info("Cleared %d cache entries for domain %s via API", cleared_count, domain_id)
+    else:
+        # Clear entire cache
+        cleared_count = cache.clear_all()
+        message = f"Cleared {cleared_count} cache entries"
+        logger.info("Cleared all %d cache entries via API", cleared_count)
+
+    return ClearCacheResponse(
+        cleared_count=cleared_count,
+        domain_id=domain_id,
+        message=message,
+    )

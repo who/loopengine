@@ -1210,3 +1210,223 @@ class TestPinBehaviorEndpoint:
         pinned = pin_store.get_behavior("shop", "customer", {"waiting": True})
         assert pinned is not None
         assert pinned.action == "wait_patiently"
+
+
+class TestDeleteCacheEndpoint:
+    """Tests for the DELETE /api/v1/behaviors/cache endpoint."""
+
+    def test_delete_cache_clears_all(self, client: TestClient) -> None:
+        """Test DELETE without domain_id clears entire cache."""
+        from loopengine.behaviors import BehaviorCache
+
+        cache = BehaviorCache()
+        behavior1 = BehaviorResponse(action="action1", parameters={}, reasoning="", metadata={})
+        behavior2 = BehaviorResponse(action="action2", parameters={}, reasoning="", metadata={})
+        behavior3 = BehaviorResponse(action="action3", parameters={}, reasoning="", metadata={})
+
+        cache.set("domain_a:agent1:hash1", behavior1)
+        cache.set("domain_a:agent2:hash2", behavior2)
+        cache.set("domain_b:agent1:hash3", behavior3)
+        assert cache.size == 3
+
+        with patch("loopengine.api.behaviors._get_behavior_cache", return_value=cache):
+            response = client.delete("/api/v1/behaviors/cache")
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["cleared_count"] == 3
+        assert data["domain_id"] is None
+        assert "Cleared 3 cache entries" in data["message"]
+        assert cache.size == 0
+
+    def test_delete_cache_clears_domain(self, client: TestClient) -> None:
+        """Test DELETE with domain_id clears only that domain."""
+        from loopengine.behaviors import BehaviorCache
+
+        cache = BehaviorCache()
+        behavior1 = BehaviorResponse(action="action1", parameters={}, reasoning="", metadata={})
+        behavior2 = BehaviorResponse(action="action2", parameters={}, reasoning="", metadata={})
+        behavior3 = BehaviorResponse(action="action3", parameters={}, reasoning="", metadata={})
+
+        cache.set("domain_a:agent1:hash1", behavior1)
+        cache.set("domain_a:agent2:hash2", behavior2)
+        cache.set("domain_b:agent1:hash3", behavior3)
+        assert cache.size == 3
+
+        with patch("loopengine.api.behaviors._get_behavior_cache", return_value=cache):
+            response = client.delete("/api/v1/behaviors/cache?domain_id=domain_a")
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["cleared_count"] == 2
+        assert data["domain_id"] == "domain_a"
+        assert "domain_a" in data["message"]
+
+        # Verify only domain_a entries were cleared
+        assert cache.size == 1
+        assert cache.get("domain_b:agent1:hash3") is not None
+        assert cache.get("domain_a:agent1:hash1") is None
+        assert cache.get("domain_a:agent2:hash2") is None
+
+    def test_delete_cache_empty_cache(self, client: TestClient) -> None:
+        """Test DELETE on empty cache returns 0 cleared."""
+        from loopengine.behaviors import BehaviorCache
+
+        cache = BehaviorCache()
+        assert cache.size == 0
+
+        with patch("loopengine.api.behaviors._get_behavior_cache", return_value=cache):
+            response = client.delete("/api/v1/behaviors/cache")
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["cleared_count"] == 0
+        assert "Cleared 0 cache entries" in data["message"]
+
+    def test_delete_cache_nonexistent_domain(self, client: TestClient) -> None:
+        """Test DELETE with nonexistent domain_id returns 0 cleared."""
+        from loopengine.behaviors import BehaviorCache
+
+        cache = BehaviorCache()
+        behavior = BehaviorResponse(action="action1", parameters={}, reasoning="", metadata={})
+        cache.set("domain_a:agent1:hash1", behavior)
+        assert cache.size == 1
+
+        with patch("loopengine.api.behaviors._get_behavior_cache", return_value=cache):
+            response = client.delete("/api/v1/behaviors/cache?domain_id=nonexistent")
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["cleared_count"] == 0
+        assert data["domain_id"] == "nonexistent"
+
+        # Original entry still exists
+        assert cache.size == 1
+
+    def test_delete_cache_does_not_clear_pinned(self, client: TestClient, tmp_path: Path) -> None:
+        """Test that DELETE cache does not clear pinned behaviors."""
+        from loopengine.behaviors import BehaviorCache, BehaviorPinStore
+
+        # Set up cache with entries
+        cache = BehaviorCache()
+        cached_behavior = BehaviorResponse(
+            action="cached_action", parameters={}, reasoning="", metadata={}
+        )
+        cache.set("shop:employee:hash1", cached_behavior)
+
+        # Set up pin store with pinned behavior
+        pin_store = BehaviorPinStore(storage_dir=tmp_path / "pins")
+        pinned_behavior = BehaviorResponse(
+            action="pinned_action", parameters={}, reasoning="", metadata={}
+        )
+        pin_id = pin_store.pin(
+            domain_id="shop",
+            agent_type="employee",
+            context={"task": "greet"},
+            behavior=pinned_behavior,
+            reason="Test pin",
+        )
+
+        # Verify both exist before clear
+        assert cache.size == 1
+        assert pin_store.get_by_id(pin_id) is not None
+
+        # Clear cache
+        with patch("loopengine.api.behaviors._get_behavior_cache", return_value=cache):
+            response = client.delete("/api/v1/behaviors/cache")
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["cleared_count"] == 1
+
+        # Cache is cleared
+        assert cache.size == 0
+
+        # Pinned behavior still exists
+        pinned = pin_store.get_by_id(pin_id)
+        assert pinned is not None
+        assert pinned.behavior.action == "pinned_action"
+
+    def test_delete_cache_resets_stats(self, client: TestClient) -> None:
+        """Test that DELETE cache (full clear) resets statistics."""
+        from loopengine.behaviors import BehaviorCache
+
+        cache = BehaviorCache()
+        behavior = BehaviorResponse(action="action1", parameters={}, reasoning="", metadata={})
+        cache.set("domain:agent:hash", behavior)
+
+        # Generate some hits and misses
+        cache.get("domain:agent:hash")  # hit
+        cache.get("nonexistent:key:abc")  # miss
+
+        # Verify stats before clear
+        stats_before = cache.get_stats()
+        assert stats_before["hits"] == 1
+        assert stats_before["misses"] == 1
+
+        with patch("loopengine.api.behaviors._get_behavior_cache", return_value=cache):
+            response = client.delete("/api/v1/behaviors/cache")
+
+        assert response.status_code == status.HTTP_200_OK
+
+        # Stats should be reset after full clear
+        stats_after = cache.get_stats()
+        assert stats_after["hits"] == 0
+        assert stats_after["misses"] == 0
+        assert stats_after["size"] == 0
+
+    def test_delete_cache_domain_preserves_stats(self, client: TestClient) -> None:
+        """Test that DELETE cache with domain_id preserves overall stats."""
+        from loopengine.behaviors import BehaviorCache
+
+        cache = BehaviorCache()
+        behavior1 = BehaviorResponse(action="action1", parameters={}, reasoning="", metadata={})
+        behavior2 = BehaviorResponse(action="action2", parameters={}, reasoning="", metadata={})
+        cache.set("domain_a:agent:hash1", behavior1)
+        cache.set("domain_b:agent:hash2", behavior2)
+
+        # Generate some hits
+        cache.get("domain_a:agent:hash1")  # hit
+        cache.get("domain_b:agent:hash2")  # hit
+
+        stats_before = cache.get_stats()
+        assert stats_before["hits"] == 2
+
+        with patch("loopengine.api.behaviors._get_behavior_cache", return_value=cache):
+            response = client.delete("/api/v1/behaviors/cache?domain_id=domain_a")
+
+        assert response.status_code == status.HTTP_200_OK
+
+        # Stats should be preserved for domain-scoped clear
+        stats_after = cache.get_stats()
+        assert stats_after["hits"] == 2
+        assert stats_after["size"] == 1  # Only domain_b remains
+
+    def test_delete_cache_multiple_domains(self, client: TestClient) -> None:
+        """Test clearing multiple domains sequentially."""
+        from loopengine.behaviors import BehaviorCache
+
+        cache = BehaviorCache()
+        behavior1 = BehaviorResponse(action="action1", parameters={}, reasoning="", metadata={})
+        behavior2 = BehaviorResponse(action="action2", parameters={}, reasoning="", metadata={})
+        behavior3 = BehaviorResponse(action="action3", parameters={}, reasoning="", metadata={})
+
+        cache.set("domain_a:agent:hash1", behavior1)
+        cache.set("domain_b:agent:hash2", behavior2)
+        cache.set("domain_c:agent:hash3", behavior3)
+
+        with patch("loopengine.api.behaviors._get_behavior_cache", return_value=cache):
+            # Clear domain_a
+            response1 = client.delete("/api/v1/behaviors/cache?domain_id=domain_a")
+            assert response1.status_code == status.HTTP_200_OK
+            assert response1.json()["cleared_count"] == 1
+            assert cache.size == 2
+
+            # Clear domain_b
+            response2 = client.delete("/api/v1/behaviors/cache?domain_id=domain_b")
+            assert response2.status_code == status.HTTP_200_OK
+            assert response2.json()["cleared_count"] == 1
+            assert cache.size == 1
+
+            # Only domain_c remains
+            assert cache.get("domain_c:agent:hash3") is not None
