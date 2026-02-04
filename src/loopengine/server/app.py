@@ -4,17 +4,21 @@ Provides:
 - WebSocket /ws/frames: Stream Frame objects at ~30 FPS
 - WebSocket /ws/control: Receive play/pause/set_speed commands
 - REST API for world state and agent information
+- GA run API for genetic algorithm evolution
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from dataclasses import asdict
-from enum import Enum
-from typing import TYPE_CHECKING, Any
+from dataclasses import asdict, dataclass, field
+from enum import Enum, StrEnum
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
@@ -22,7 +26,10 @@ from pydantic import BaseModel, Field
 from loopengine.api.behaviors import router as behaviors_router
 from loopengine.api.domains import router as domains_router
 from loopengine.corpora.sandwich_shop import create_world
+from loopengine.engine.fitness import alex_fitness, maria_fitness, tom_fitness
+from loopengine.engine.ga import GAEngine
 from loopengine.engine.simulation import tick_world
+from loopengine.model.genome import GenomeSchema, GenomeTrait
 from loopengine.projection.projector import Frame, project
 
 if TYPE_CHECKING:
@@ -150,6 +157,200 @@ class SimulationState:
 _sim_state: SimulationState | None = None
 
 
+# GA Job Management
+
+
+class GAJobStatus(StrEnum):
+    """Status of a GA job."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@dataclass
+class GAJob:
+    """Represents a GA evolution job."""
+
+    job_id: str
+    role: str
+    target_agent_id: str
+    generations: int
+    population_size: int
+    status: GAJobStatus = GAJobStatus.PENDING
+    current_generation: int = 0
+    best_genome: dict[str, float] = field(default_factory=dict)
+    best_fitness: float = float("-inf")
+    error_message: str = ""
+    stats_history: list[dict[str, Any]] = field(default_factory=list)
+
+
+class GAJobManager:
+    """Thread-safe manager for GA background jobs."""
+
+    # Mapping from role to (target_agent_id, fitness_fn)
+    ROLE_CONFIG: ClassVar[dict[str, tuple[str, Any]]] = {
+        "sandwich_maker": ("tom", tom_fitness),
+        "cashier": ("alex", alex_fitness),
+        "owner": ("maria", maria_fitness),
+    }
+
+    def __init__(self) -> None:
+        """Initialize the GA job manager."""
+        self._jobs: dict[str, GAJob] = {}
+        self._lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ga_worker")
+
+    def create_job(
+        self,
+        role: str,
+        generations: int = 100,
+        population_size: int = 50,
+    ) -> str:
+        """Create a new GA job and start it in the background.
+
+        Args:
+            role: Agent role to evolve (sandwich_maker, cashier, owner).
+            generations: Number of generations to run.
+            population_size: Size of the population.
+
+        Returns:
+            str: Job ID for status polling.
+
+        Raises:
+            ValueError: If role is not recognized.
+        """
+        if role not in self.ROLE_CONFIG:
+            valid_roles = ", ".join(self.ROLE_CONFIG.keys())
+            msg = f"Unknown role: {role}. Valid roles: {valid_roles}"
+            raise ValueError(msg)
+
+        target_agent_id, _ = self.ROLE_CONFIG[role]
+
+        job_id = str(uuid.uuid4())
+        job = GAJob(
+            job_id=job_id,
+            role=role,
+            target_agent_id=target_agent_id,
+            generations=generations,
+            population_size=population_size,
+        )
+
+        with self._lock:
+            self._jobs[job_id] = job
+
+        # Submit job to executor
+        self._executor.submit(self._run_ga_job, job_id)
+
+        return job_id
+
+    def get_job(self, job_id: str) -> GAJob | None:
+        """Get job by ID.
+
+        Args:
+            job_id: The job ID to look up.
+
+        Returns:
+            GAJob or None if not found.
+        """
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def _run_ga_job(self, job_id: str) -> None:
+        """Run GA evolution in background thread.
+
+        Args:
+            job_id: The job to run.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            job.status = GAJobStatus.RUNNING
+
+        try:
+            # Get role configuration
+            target_agent_id, fitness_fn = self.ROLE_CONFIG[job.role]
+
+            # Create a fresh world template for evaluation
+            world_template = create_world()
+
+            # Get the target agent to extract schema from genome keys
+            target_agent = world_template.agents[target_agent_id]
+            schema = GenomeSchema(role=job.role)
+            for trait_name in target_agent.genome.keys():
+                schema.traits[trait_name] = GenomeTrait(
+                    name=trait_name,
+                    description=f"Trait {trait_name} for {job.role}",
+                    min_val=0.0,
+                    max_val=1.0,
+                )
+
+            # Create GA engine
+            ga = GAEngine(
+                population_size=job.population_size,
+                selection_count=max(2, job.population_size // 5),
+                mutation_rate=0.1,
+                mutation_magnitude=0.05,
+            )
+            ga.initialize_population(schema)
+
+            # Create fitness evaluator that runs simulation
+            def evaluate_genome(genome: dict[str, float]) -> float:
+                """Evaluate a genome by running simulation."""
+                from loopengine.engine.ga import evaluate_fitness
+
+                return evaluate_fitness(
+                    genome=genome,
+                    world_template=world_template,
+                    target_agent_id=target_agent_id,
+                    ticks=500,  # Shorter for faster evaluation
+                    fitness_fn=fitness_fn,
+                )
+
+            # Run generations
+            for gen in range(job.generations):
+                stats = ga.run_generation(evaluate_genome)
+
+                # Update job progress
+                with self._lock:
+                    job.current_generation = gen + 1
+                    job.best_genome = ga.best_genome.copy()
+                    job.best_fitness = ga.best_fitness
+                    job.stats_history.append(
+                        {
+                            "generation": stats.generation,
+                            "best_fitness": stats.best_fitness,
+                            "avg_fitness": stats.avg_fitness,
+                            "min_fitness": stats.min_fitness,
+                            "max_fitness": stats.max_fitness,
+                        }
+                    )
+
+            # Mark complete
+            with self._lock:
+                job.status = GAJobStatus.COMPLETED
+
+        except Exception as e:
+            with self._lock:
+                job.status = GAJobStatus.FAILED
+                job.error_message = str(e)
+            logger.exception("GA job %s failed: %s", job_id, e)
+
+
+# Global GA job manager
+_ga_job_manager: GAJobManager | None = None
+
+
+def get_ga_job_manager() -> GAJobManager:
+    """Get or create the global GA job manager."""
+    global _ga_job_manager
+    if _ga_job_manager is None:
+        _ga_job_manager = GAJobManager()
+    return _ga_job_manager
+
+
 def get_sim_state() -> SimulationState:
     """Get or create the global simulation state."""
     global _sim_state
@@ -231,6 +432,40 @@ class ControlCommandResponse(BaseModel):
 
     success: bool = Field(description="Whether command succeeded")
     message: str = Field(description="Status message")
+
+
+# GA API models
+
+
+class GARunRequest(BaseModel):
+    """Request model for starting a GA run."""
+
+    role: str = Field(description="Agent role to evolve (sandwich_maker, cashier, owner)")
+    generations: int = Field(default=100, ge=1, le=1000, description="Number of generations")
+    population_size: int = Field(default=50, ge=10, le=500, description="Population size")
+
+
+class GARunResponse(BaseModel):
+    """Response model for GA run initiation."""
+
+    job_id: str = Field(description="Job ID for status polling")
+    message: str = Field(description="Status message")
+
+
+class GAStatusResponse(BaseModel):
+    """Response model for GA job status."""
+
+    job_id: str = Field(description="Job ID")
+    status: str = Field(description="Job status: pending, running, completed, failed")
+    role: str = Field(description="Agent role being evolved")
+    current_generation: int = Field(description="Current generation number")
+    total_generations: int = Field(description="Total generations to run")
+    best_fitness: float | None = Field(description="Best fitness found so far")
+    best_genome: dict[str, float] = Field(description="Best genome found")
+    error_message: str = Field(default="", description="Error message if failed")
+    stats_history: list[dict[str, Any]] = Field(
+        default_factory=list, description="Generation stats history"
+    )
 
 
 # REST endpoints
@@ -395,6 +630,86 @@ async def set_speed(speed: float = 1.0) -> ControlCommandResponse:
     sim = get_sim_state()
     sim.speed = speed
     return ControlCommandResponse(success=True, message=f"Speed set to {sim.speed}")
+
+
+# GA endpoints
+
+
+@app.post("/api/ga/run", response_model=GARunResponse, tags=["ga"])
+async def start_ga_run(request: GARunRequest) -> GARunResponse:
+    """Start a GA evolution run in the background.
+
+    Runs the genetic algorithm asynchronously to evolve the specified role.
+    Returns a job_id that can be used to poll for status via GET /api/ga/status/{job_id}.
+
+    Args:
+        request: GA run request with role, generations, and population_size.
+
+    Returns:
+        GARunResponse with job_id for status polling.
+
+    Raises:
+        HTTPException: If role is not valid.
+    """
+    ga_manager = get_ga_job_manager()
+    try:
+        job_id = ga_manager.create_job(
+            role=request.role,
+            generations=request.generations,
+            population_size=request.population_size,
+        )
+        logger.info("Started GA job %s for role=%s", job_id, request.role)
+        return GARunResponse(
+            job_id=job_id,
+            message=f"GA evolution started for role '{request.role}'",
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
+
+
+@app.get("/api/ga/status/{job_id}", response_model=GAStatusResponse, tags=["ga"])
+async def get_ga_status(job_id: str) -> GAStatusResponse:
+    """Get status of a GA evolution job.
+
+    Poll this endpoint to check progress and retrieve results when complete.
+
+    Args:
+        job_id: The job ID returned from POST /api/ga/run.
+
+    Returns:
+        GAStatusResponse with current status, progress, and best genome.
+
+    Raises:
+        HTTPException: If job_id is not found.
+    """
+    ga_manager = get_ga_job_manager()
+    job = ga_manager.get_job(job_id)
+
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"GA job '{job_id}' not found",
+        )
+
+    # Handle -inf which is not JSON serializable
+    best_fitness: float | None = job.best_fitness
+    if math.isinf(best_fitness):
+        best_fitness = None if best_fitness < 0 else float("inf")
+
+    return GAStatusResponse(
+        job_id=job.job_id,
+        status=job.status.value,
+        role=job.role,
+        current_generation=job.current_generation,
+        total_generations=job.generations,
+        best_fitness=best_fitness,
+        best_genome=job.best_genome,
+        error_message=job.error_message,
+        stats_history=job.stats_history,
+    )
 
 
 # WebSocket connections management

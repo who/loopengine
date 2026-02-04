@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 
 from loopengine.server.app import (
     ConnectionManager,
+    GAJobManager,
+    GAJobStatus,
     SimulationState,
     _frame_to_dict,
     app,
@@ -427,3 +429,174 @@ class TestRouterIntegration:
         response = client.get("/api/v1/domains/nonexistent")
         assert response.status_code == status.HTTP_404_NOT_FOUND
         assert "domain" in response.json().get("detail", "").lower()
+
+
+class TestGAJobManager:
+    """Tests for GAJobManager class."""
+
+    def test_create_job_valid_role(self) -> None:
+        """Test creating a job with valid role."""
+        manager = GAJobManager()
+        job_id = manager.create_job(role="sandwich_maker", generations=5, population_size=10)
+        assert job_id is not None
+        assert len(job_id) > 0
+
+        job = manager.get_job(job_id)
+        assert job is not None
+        assert job.role == "sandwich_maker"
+        assert job.generations == 5
+        assert job.population_size == 10
+
+    def test_create_job_invalid_role(self) -> None:
+        """Test creating a job with invalid role raises ValueError."""
+        manager = GAJobManager()
+        with pytest.raises(ValueError, match="Unknown role"):
+            manager.create_job(role="invalid_role")
+
+    def test_get_job_not_found(self) -> None:
+        """Test getting a non-existent job returns None."""
+        manager = GAJobManager()
+        assert manager.get_job("nonexistent") is None
+
+    def test_job_runs_to_completion(self) -> None:
+        """Test that a job eventually completes."""
+        manager = GAJobManager()
+        job_id = manager.create_job(role="sandwich_maker", generations=2, population_size=10)
+
+        # Wait for job to complete (with timeout)
+        max_wait = 30  # seconds
+        wait_interval = 0.5
+        elapsed = 0.0
+
+        while elapsed < max_wait:
+            job = manager.get_job(job_id)
+            if job and job.status in (GAJobStatus.COMPLETED, GAJobStatus.FAILED):
+                break
+            time.sleep(wait_interval)
+            elapsed += wait_interval
+
+        job = manager.get_job(job_id)
+        assert job is not None
+        assert job.status == GAJobStatus.COMPLETED
+        assert job.current_generation == 2
+        assert job.best_genome  # Should have a best genome
+        assert job.best_fitness != float("-inf")  # Should have computed fitness
+
+    def test_all_valid_roles(self) -> None:
+        """Test that all valid roles can create jobs."""
+        manager = GAJobManager()
+        for role in ["sandwich_maker", "cashier", "owner"]:
+            job_id = manager.create_job(role=role, generations=1, population_size=10)
+            job = manager.get_job(job_id)
+            assert job is not None
+            assert job.role == role
+
+
+class TestGAEndpoints:
+    """Tests for GA REST API endpoints."""
+
+    def test_ga_run_valid_request(self, client: TestClient) -> None:
+        """Test POST /api/ga/run with valid request."""
+        response = client.post(
+            "/api/ga/run",
+            json={"role": "sandwich_maker", "generations": 2, "population_size": 10},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert "job_id" in data
+        assert len(data["job_id"]) > 0
+        assert "message" in data
+        assert "sandwich_maker" in data["message"]
+
+    def test_ga_run_invalid_role(self, client: TestClient) -> None:
+        """Test POST /api/ga/run with invalid role."""
+        response = client.post(
+            "/api/ga/run",
+            json={"role": "invalid_role", "generations": 10, "population_size": 20},
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert "Unknown role" in response.json()["detail"]
+
+    def test_ga_run_default_parameters(self, client: TestClient) -> None:
+        """Test POST /api/ga/run with only role specified."""
+        response = client.post(
+            "/api/ga/run",
+            json={"role": "cashier"},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert "job_id" in data
+
+    def test_ga_status_valid_job(self, client: TestClient) -> None:
+        """Test GET /api/ga/status/{job_id} for an existing job."""
+        # First create a job
+        run_response = client.post(
+            "/api/ga/run",
+            json={"role": "sandwich_maker", "generations": 2, "population_size": 10},
+        )
+        job_id = run_response.json()["job_id"]
+
+        # Get status
+        status_response = client.get(f"/api/ga/status/{job_id}")
+        assert status_response.status_code == status.HTTP_200_OK
+        data = status_response.json()
+
+        assert data["job_id"] == job_id
+        assert data["role"] == "sandwich_maker"
+        assert data["total_generations"] == 2
+        assert data["status"] in ["pending", "running", "completed", "failed"]
+        assert "best_genome" in data
+        # best_fitness can be None (when not yet computed) or a float
+        assert "best_fitness" in data
+
+    def test_ga_status_not_found(self, client: TestClient) -> None:
+        """Test GET /api/ga/status/{job_id} for non-existent job."""
+        response = client.get("/api/ga/status/nonexistent-job-id")
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        assert "not found" in response.json()["detail"].lower()
+
+    def test_ga_run_and_poll_to_completion(self, client: TestClient) -> None:
+        """Test full workflow: run GA and poll until completion."""
+        # Start the GA run
+        run_response = client.post(
+            "/api/ga/run",
+            json={"role": "owner", "generations": 2, "population_size": 10},
+        )
+        assert run_response.status_code == status.HTTP_200_OK
+        job_id = run_response.json()["job_id"]
+
+        # Poll until completion
+        max_wait = 30  # seconds
+        wait_interval = 0.5
+        elapsed = 0.0
+        final_status = None
+
+        while elapsed < max_wait:
+            status_response = client.get(f"/api/ga/status/{job_id}")
+            assert status_response.status_code == status.HTTP_200_OK
+            data = status_response.json()
+
+            if data["status"] in ["completed", "failed"]:
+                final_status = data
+                break
+
+            time.sleep(wait_interval)
+            elapsed += wait_interval
+
+        assert final_status is not None
+        assert final_status["status"] == "completed"
+        assert final_status["current_generation"] == 2
+        assert len(final_status["best_genome"]) > 0
+        assert final_status["best_fitness"] is not None
+        # Should have stats history
+        assert len(final_status["stats_history"]) == 2
+
+    def test_ga_run_all_roles(self, client: TestClient) -> None:
+        """Test that all valid roles can be run."""
+        for role in ["sandwich_maker", "cashier", "owner"]:
+            response = client.post(
+                "/api/ga/run",
+                json={"role": role, "generations": 1, "population_size": 10},
+            )
+            assert response.status_code == status.HTTP_200_OK
+            assert "job_id" in response.json()
