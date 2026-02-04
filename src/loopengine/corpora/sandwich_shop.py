@@ -6,7 +6,7 @@ agents, links, labels, and external inputs.
 
 from __future__ import annotations
 
-from loopengine.model import Link, LinkType, World
+from loopengine.model import Label, LabelContext, Link, LinkType, World
 
 
 def create_links() -> dict[str, Link]:
@@ -102,12 +102,77 @@ def create_links() -> dict[str, Link]:
     return links
 
 
-def create_world() -> World:
-    """Create the sandwich shop world with links.
+def create_labels() -> dict[str, Label]:
+    """Create the 5 labels for the sandwich shop per PRD section 9.4.
+
+    Labels:
+    - SandwichShop: Global shop context with health_code, operating_hours, etc.
+    - FrontLine: Customer-facing context with appearance and demeanor norms
+    - Kitchen: Food preparation context with safety constraints and equipment
+    - Management: Administrative context with supplier and scheduling resources
+    - Register: Point-of-sale context with terminal and cash handling
 
     Returns:
-        World: A world containing the sandwich shop links.
+        dict[str, Label]: Labels keyed by name.
+    """
+    labels = {}
+
+    # SandwichShop: global context for the entire shop
+    labels["SandwichShop"] = Label(
+        name="SandwichShop",
+        context=LabelContext(
+            constraints=["health_code", "operating_hours_10_to_8", "max_capacity_30"],
+            resources=["ingredient_supply", "POS_system", "kitchen_equipment"],
+            norms=["FIFO_orders", "customer_greeting", "clean_as_you_go"],
+        ),
+    )
+
+    # FrontLine: customer-facing roles
+    labels["FrontLine"] = Label(
+        name="FrontLine",
+        context=LabelContext(
+            constraints=["customer_facing_appearance"],
+            norms=["friendly_demeanor", "no_phone_use"],
+        ),
+    )
+
+    # Kitchen: food preparation area
+    labels["Kitchen"] = Label(
+        name="Kitchen",
+        context=LabelContext(
+            constraints=["food_safety_gloves", "temperature_monitoring"],
+            resources=["grill", "prep_station", "cold_storage"],
+        ),
+    )
+
+    # Management: administrative roles
+    labels["Management"] = Label(
+        name="Management",
+        context=LabelContext(
+            resources=["supplier_contacts", "POS_admin", "scheduling_system"],
+            norms=["daily_inventory_check", "weekly_supply_order"],
+        ),
+    )
+
+    # Register: point-of-sale area
+    labels["Register"] = Label(
+        name="Register",
+        context=LabelContext(
+            resources=["POS_terminal", "cash_drawer"],
+            constraints=["cash_handling_policy"],
+        ),
+    )
+
+    return labels
+
+
+def create_world() -> World:
+    """Create the sandwich shop world with links and labels.
+
+    Returns:
+        World: A world containing the sandwich shop links and labels.
     """
     world = World()
     world.links = create_links()
+    world.labels = create_labels()
     return world

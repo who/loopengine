@@ -1,6 +1,6 @@
 """Tests for the Sandwich Shop corpus."""
 
-from loopengine.corpora.sandwich_shop import create_links, create_world
+from loopengine.corpora.sandwich_shop import create_labels, create_links, create_world
 from loopengine.model import LinkType
 
 
@@ -131,3 +131,108 @@ def test_create_world_has_links() -> None:
     world = create_world()
     assert len(world.links) == 6
     assert "maria_to_tom" in world.links
+
+
+# ============================================================================
+# LABEL TESTS (PRD Section 9.4)
+# ============================================================================
+
+
+def test_labels_count() -> None:
+    """Verify 5 labels are created."""
+    labels = create_labels()
+    assert len(labels) == 5
+
+
+def test_labels_names() -> None:
+    """Verify all label names match PRD."""
+    labels = create_labels()
+    expected_names = {"SandwichShop", "FrontLine", "Kitchen", "Management", "Register"}
+    assert set(labels.keys()) == expected_names
+
+
+def test_sandwichshop_label_constraints() -> None:
+    """Verify SandwichShop label has health_code in constraints per PRD."""
+    labels = create_labels()
+    label = labels["SandwichShop"]
+
+    assert label.name == "SandwichShop"
+    assert "health_code" in label.context.constraints
+    assert "operating_hours_10_to_8" in label.context.constraints
+    assert "max_capacity_30" in label.context.constraints
+
+
+def test_sandwichshop_label_resources() -> None:
+    """Verify SandwichShop label has correct resources per PRD."""
+    labels = create_labels()
+    label = labels["SandwichShop"]
+
+    assert "ingredient_supply" in label.context.resources
+    assert "POS_system" in label.context.resources
+    assert "kitchen_equipment" in label.context.resources
+
+
+def test_sandwichshop_label_norms() -> None:
+    """Verify SandwichShop label has correct norms per PRD."""
+    labels = create_labels()
+    label = labels["SandwichShop"]
+
+    assert "FIFO_orders" in label.context.norms
+    assert "customer_greeting" in label.context.norms
+    assert "clean_as_you_go" in label.context.norms
+
+
+def test_frontline_label() -> None:
+    """Verify FrontLine label has customer-facing constraints and norms."""
+    labels = create_labels()
+    label = labels["FrontLine"]
+
+    assert label.name == "FrontLine"
+    assert "customer_facing_appearance" in label.context.constraints
+    assert "friendly_demeanor" in label.context.norms
+    assert "no_phone_use" in label.context.norms
+
+
+def test_kitchen_label() -> None:
+    """Verify Kitchen label has food safety constraints and equipment resources."""
+    labels = create_labels()
+    label = labels["Kitchen"]
+
+    assert label.name == "Kitchen"
+    assert "food_safety_gloves" in label.context.constraints
+    assert "temperature_monitoring" in label.context.constraints
+    assert "grill" in label.context.resources
+    assert "prep_station" in label.context.resources
+    assert "cold_storage" in label.context.resources
+
+
+def test_management_label() -> None:
+    """Verify Management label has administrative resources and norms."""
+    labels = create_labels()
+    label = labels["Management"]
+
+    assert label.name == "Management"
+    assert "supplier_contacts" in label.context.resources
+    assert "POS_admin" in label.context.resources
+    assert "scheduling_system" in label.context.resources
+    assert "daily_inventory_check" in label.context.norms
+    assert "weekly_supply_order" in label.context.norms
+
+
+def test_register_label() -> None:
+    """Verify Register label has POS resources and cash handling constraint."""
+    labels = create_labels()
+    label = labels["Register"]
+
+    assert label.name == "Register"
+    assert "POS_terminal" in label.context.resources
+    assert "cash_drawer" in label.context.resources
+    assert "cash_handling_policy" in label.context.constraints
+
+
+def test_create_world_has_labels() -> None:
+    """Verify create_world populates world.labels."""
+    world = create_world()
+    assert len(world.labels) == 5
+    assert "SandwichShop" in world.labels
+    assert "Kitchen" in world.labels
