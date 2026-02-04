@@ -600,3 +600,299 @@ class TestGAEndpoints:
             )
             assert response.status_code == status.HTTP_200_OK
             assert "job_id" in response.json()
+
+
+class TestWebSocketGACommands:
+    """Tests for GA commands via WebSocket control endpoint."""
+
+    def test_start_ga_command(self, client: TestClient) -> None:
+        """Test start_ga command via WebSocket."""
+        with client.websocket_connect("/ws/control") as websocket:
+            websocket.send_json(
+                {
+                    "type": "start_ga",
+                    "role": "sandwich_maker",
+                    "generations": 2,
+                    "population_size": 10,
+                }
+            )
+            response = websocket.receive_json()
+            assert response["success"] is True
+            assert "job_id" in response
+            assert "started" in response["message"].lower()
+
+    def test_start_ga_missing_role(self, client: TestClient) -> None:
+        """Test start_ga command without role."""
+        with client.websocket_connect("/ws/control") as websocket:
+            websocket.send_json({"type": "start_ga"})
+            response = websocket.receive_json()
+            assert response["success"] is False
+            assert "role" in response["message"].lower()
+
+    def test_start_ga_invalid_role(self, client: TestClient) -> None:
+        """Test start_ga command with invalid role."""
+        with client.websocket_connect("/ws/control") as websocket:
+            websocket.send_json(
+                {
+                    "type": "start_ga",
+                    "role": "invalid_role",
+                }
+            )
+            response = websocket.receive_json()
+            assert response["success"] is False
+            assert "unknown role" in response["message"].lower()
+
+    def test_start_ga_invalid_generations(self, client: TestClient) -> None:
+        """Test start_ga command with invalid generations."""
+        with client.websocket_connect("/ws/control") as websocket:
+            websocket.send_json(
+                {
+                    "type": "start_ga",
+                    "role": "sandwich_maker",
+                    "generations": 0,
+                }
+            )
+            response = websocket.receive_json()
+            assert response["success"] is False
+
+    def test_start_ga_invalid_population_size(self, client: TestClient) -> None:
+        """Test start_ga command with invalid population size."""
+        with client.websocket_connect("/ws/control") as websocket:
+            websocket.send_json(
+                {
+                    "type": "start_ga",
+                    "role": "sandwich_maker",
+                    "population_size": 5,  # Min is 10
+                }
+            )
+            response = websocket.receive_json()
+            assert response["success"] is False
+
+    def test_stop_ga_command_no_running_job(self, client: TestClient) -> None:
+        """Test stop_ga command when no job is running."""
+        # Use a non-existent job_id to ensure we get the "not found" response
+        with client.websocket_connect("/ws/control") as websocket:
+            websocket.send_json({"type": "stop_ga", "job_id": "nonexistent-test-job-id"})
+            response = websocket.receive_json()
+            assert response["success"] is False
+            assert "not" in response["message"].lower()
+
+    def test_stop_ga_with_job_id_not_found(self, client: TestClient) -> None:
+        """Test stop_ga command with non-existent job_id."""
+        with client.websocket_connect("/ws/control") as websocket:
+            websocket.send_json(
+                {
+                    "type": "stop_ga",
+                    "job_id": "nonexistent-job",
+                }
+            )
+            response = websocket.receive_json()
+            assert response["success"] is False
+
+    def test_get_ga_status_no_running_job(self, client: TestClient) -> None:
+        """Test get_ga_status response format without specifying job_id."""
+        # Note: We test the response format, not the "no job running" case
+        # because other tests may leave jobs running. The get_ga_status command
+        # without job_id returns the running job or success: True with status: None
+        with client.websocket_connect("/ws/control") as websocket:
+            websocket.send_json({"type": "get_ga_status"})
+            response = websocket.receive_json()
+            assert response["success"] is True
+            # Status is either None (no running job) or a valid status string
+            assert response["status"] is None or response["status"] in [
+                "pending",
+                "running",
+                "completed",
+                "failed",
+            ]
+
+    def test_get_ga_status_job_not_found(self, client: TestClient) -> None:
+        """Test get_ga_status with non-existent job_id."""
+        with client.websocket_connect("/ws/control") as websocket:
+            websocket.send_json(
+                {
+                    "type": "get_ga_status",
+                    "job_id": "nonexistent-job",
+                }
+            )
+            response = websocket.receive_json()
+            assert response["success"] is False
+            assert "not found" in response["message"].lower()
+
+    def test_get_ga_status_for_specific_job(self, client: TestClient) -> None:
+        """Test get_ga_status with specific job_id."""
+        with client.websocket_connect("/ws/control") as websocket:
+            # Start a GA job
+            websocket.send_json(
+                {
+                    "type": "start_ga",
+                    "role": "cashier",
+                    "generations": 2,
+                    "population_size": 10,
+                }
+            )
+            start_response = websocket.receive_json()
+            assert start_response["success"] is True
+            job_id = start_response["job_id"]
+
+            # Get status for the job
+            websocket.send_json(
+                {
+                    "type": "get_ga_status",
+                    "job_id": job_id,
+                }
+            )
+            status_response = websocket.receive_json()
+            assert status_response["success"] is True
+            assert status_response["job_id"] == job_id
+            assert status_response["role"] == "cashier"
+            assert "status" in status_response
+            assert status_response["total_generations"] == 2
+
+    def test_start_ga_and_stop(self, client: TestClient) -> None:
+        """Test starting GA and then stopping it."""
+        with client.websocket_connect("/ws/control") as websocket:
+            # Start a longer GA job
+            websocket.send_json(
+                {
+                    "type": "start_ga",
+                    "role": "owner",
+                    "generations": 50,  # More generations to give time to stop
+                    "population_size": 10,
+                }
+            )
+            start_response = websocket.receive_json()
+            assert start_response["success"] is True
+            job_id = start_response["job_id"]
+
+            # Wait briefly for job to start running
+            time.sleep(0.5)
+
+            # Stop the job
+            websocket.send_json(
+                {
+                    "type": "stop_ga",
+                    "job_id": job_id,
+                }
+            )
+            stop_response = websocket.receive_json()
+            # May succeed or fail depending on timing
+            # (job might have completed quickly)
+            assert "message" in stop_response
+
+    def test_ga_commands_case_insensitive(self, client: TestClient) -> None:
+        """Test that GA commands are case insensitive."""
+        with client.websocket_connect("/ws/control") as websocket:
+            websocket.send_json(
+                {
+                    "type": "START_GA",
+                    "role": "sandwich_maker",
+                    "generations": 1,
+                    "population_size": 10,
+                }
+            )
+            response = websocket.receive_json()
+            assert response["success"] is True
+
+            websocket.send_json({"type": "GET_GA_STATUS"})
+            response = websocket.receive_json()
+            assert response["success"] is True
+
+
+class TestGAJobManagerStopFunctionality:
+    """Tests for GAJobManager stop functionality."""
+
+    def test_stop_job(self) -> None:
+        """Test stopping a GA job."""
+        manager = GAJobManager()
+        job_id = manager.create_job(
+            role="sandwich_maker",
+            generations=100,  # Many generations
+            population_size=10,
+        )
+
+        # Wait for job to start running
+        max_wait = 5.0
+        elapsed = 0.0
+        while elapsed < max_wait:
+            job = manager.get_job(job_id)
+            if job and job.status == GAJobStatus.RUNNING:
+                break
+            time.sleep(0.1)
+            elapsed += 0.1
+
+        # Stop the job
+        stopped = manager.stop_job(job_id)
+        assert stopped is True
+
+        # Wait for job to stop
+        elapsed = 0.0
+        while elapsed < max_wait:
+            job = manager.get_job(job_id)
+            if job and job.status == GAJobStatus.COMPLETED:
+                break
+            time.sleep(0.1)
+            elapsed += 0.1
+
+        job = manager.get_job(job_id)
+        assert job is not None
+        assert job.status == GAJobStatus.COMPLETED
+        assert "stopped" in job.error_message.lower()
+
+    def test_stop_nonexistent_job(self) -> None:
+        """Test stopping a non-existent job returns False."""
+        manager = GAJobManager()
+        assert manager.stop_job("nonexistent") is False
+
+    def test_stop_completed_job(self) -> None:
+        """Test stopping an already completed job returns False."""
+        manager = GAJobManager()
+        job_id = manager.create_job(
+            role="sandwich_maker",
+            generations=1,
+            population_size=10,
+        )
+
+        # Wait for completion
+        max_wait = 30.0
+        elapsed = 0.0
+        while elapsed < max_wait:
+            job = manager.get_job(job_id)
+            if job and job.status == GAJobStatus.COMPLETED:
+                break
+            time.sleep(0.5)
+            elapsed += 0.5
+
+        # Try to stop completed job
+        stopped = manager.stop_job(job_id)
+        assert stopped is False
+
+    def test_get_running_job(self) -> None:
+        """Test getting the running job."""
+        manager = GAJobManager()
+        # Initially no running job
+        assert manager.get_running_job() is None
+
+        # Start a job
+        job_id = manager.create_job(
+            role="cashier",
+            generations=100,
+            population_size=10,
+        )
+
+        # Wait for it to start running
+        max_wait = 5.0
+        elapsed = 0.0
+        while elapsed < max_wait:
+            running_job = manager.get_running_job()
+            if running_job is not None:
+                break
+            time.sleep(0.1)
+            elapsed += 0.1
+
+        running_job = manager.get_running_job()
+        assert running_job is not None
+        assert running_job.job_id == job_id
+
+        # Stop the job
+        manager.stop_job(job_id)

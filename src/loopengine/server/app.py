@@ -14,6 +14,7 @@ import logging
 import math
 import threading
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
@@ -184,6 +185,7 @@ class GAJob:
     best_fitness: float = float("-inf")
     error_message: str = ""
     stats_history: list[dict[str, Any]] = field(default_factory=list)
+    stop_requested: bool = False
 
 
 class GAJobManager:
@@ -201,6 +203,22 @@ class GAJobManager:
         self._jobs: dict[str, GAJob] = {}
         self._lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ga_worker")
+        self._progress_callback: Callable[[str, int, float], None] | None = None
+        self._complete_callback: Callable[[str, dict[str, float]], None] | None = None
+
+    def set_callbacks(
+        self,
+        progress_callback: Callable[[str, int, float], None] | None,
+        complete_callback: Callable[[str, dict[str, float]], None] | None,
+    ) -> None:
+        """Set callbacks for GA progress and completion events.
+
+        Args:
+            progress_callback: Called with (job_id, generation, best_fitness) each generation.
+            complete_callback: Called with (job_id, best_genome) when job completes.
+        """
+        self._progress_callback = progress_callback
+        self._complete_callback = complete_callback
 
     def create_job(
         self,
@@ -257,6 +275,36 @@ class GAJobManager:
         with self._lock:
             return self._jobs.get(job_id)
 
+    def stop_job(self, job_id: str) -> bool:
+        """Request a running job to stop.
+
+        Args:
+            job_id: The job ID to stop.
+
+        Returns:
+            True if stop was requested, False if job not found or not running.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return False
+            if job.status != GAJobStatus.RUNNING:
+                return False
+            job.stop_requested = True
+            return True
+
+    def get_running_job(self) -> GAJob | None:
+        """Get the currently running GA job, if any.
+
+        Returns:
+            The running GAJob or None if no job is running.
+        """
+        with self._lock:
+            for job in self._jobs.values():
+                if job.status == GAJobStatus.RUNNING:
+                    return job
+            return None
+
     def _run_ga_job(self, job_id: str) -> None:
         """Run GA evolution in background thread.
 
@@ -311,6 +359,14 @@ class GAJobManager:
 
             # Run generations
             for gen in range(job.generations):
+                # Check for stop request
+                with self._lock:
+                    if job.stop_requested:
+                        job.status = GAJobStatus.COMPLETED
+                        job.error_message = "Stopped by user request"
+                        logger.info("GA job %s stopped at generation %d", job_id, gen)
+                        return
+
                 stats = ga.run_generation(evaluate_genome)
 
                 # Update job progress
@@ -328,9 +384,23 @@ class GAJobManager:
                         }
                     )
 
+                # Call progress callback
+                if self._progress_callback:
+                    try:
+                        self._progress_callback(job_id, gen + 1, ga.best_fitness)
+                    except Exception as e:
+                        logger.warning("Progress callback error: %s", e)
+
             # Mark complete
             with self._lock:
                 job.status = GAJobStatus.COMPLETED
+
+            # Call complete callback
+            if self._complete_callback:
+                try:
+                    self._complete_callback(job_id, ga.best_genome.copy())
+                except Exception as e:
+                    logger.warning("Complete callback error: %s", e)
 
         except Exception as e:
             with self._lock:
@@ -351,6 +421,56 @@ def get_ga_job_manager() -> GAJobManager:
     return _ga_job_manager
 
 
+# Event loop for broadcasting from background threads
+_broadcast_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _broadcast_ga_progress(job_id: str, generation: int, best_fitness: float) -> None:
+    """Broadcast GA progress to all control WebSocket clients.
+
+    This is called from background GA threads, so it schedules the async
+    broadcast on the main event loop.
+
+    Args:
+        job_id: The job ID.
+        generation: Current generation number.
+        best_fitness: Current best fitness value.
+    """
+    if _broadcast_loop is None:
+        return
+
+    message = {
+        "type": "ga_progress",
+        "job_id": job_id,
+        "generation": generation,
+        "best_fitness": best_fitness if not math.isinf(best_fitness) else None,
+    }
+
+    asyncio.run_coroutine_threadsafe(manager.broadcast_control(message), _broadcast_loop)
+
+
+def _broadcast_ga_complete(job_id: str, best_genome: dict[str, float]) -> None:
+    """Broadcast GA completion to all control WebSocket clients.
+
+    This is called from background GA threads, so it schedules the async
+    broadcast on the main event loop.
+
+    Args:
+        job_id: The job ID.
+        best_genome: The best genome found.
+    """
+    if _broadcast_loop is None:
+        return
+
+    message = {
+        "type": "ga_complete",
+        "job_id": job_id,
+        "best_genome": best_genome,
+    }
+
+    asyncio.run_coroutine_threadsafe(manager.broadcast_control(message), _broadcast_loop)
+
+
 def get_sim_state() -> SimulationState:
     """Get or create the global simulation state."""
     global _sim_state
@@ -361,11 +481,21 @@ def get_sim_state() -> SimulationState:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Application lifespan manager: start/stop simulation thread."""
+    """Application lifespan manager: start/stop simulation thread and GA broadcasts."""
+    global _broadcast_loop
+
+    # Capture the event loop for broadcasting from background threads
+    _broadcast_loop = asyncio.get_running_loop()
+
+    # Set up GA broadcast callbacks
+    ga_manager = get_ga_job_manager()
+    ga_manager.set_callbacks(_broadcast_ga_progress, _broadcast_ga_complete)
+
     sim = get_sim_state()
     sim.start()
     yield
     sim.stop()
+    _broadcast_loop = None
 
 
 # Create FastAPI app
@@ -759,6 +889,22 @@ class ConnectionManager:
         for conn in disconnected:
             self.disconnect_frames(conn)
 
+    async def broadcast_control(self, message: dict[str, Any]) -> None:
+        """Broadcast a message to all connected control clients.
+
+        Args:
+            message: Message to broadcast to all control WebSocket connections.
+        """
+        disconnected = []
+        for connection in self.control_connections:
+            try:
+                await connection.send_json(message)
+            except Exception:
+                disconnected.append(connection)
+
+        for conn in disconnected:
+            self.disconnect_control(conn)
+
 
 # Global connection manager
 manager = ConnectionManager()
@@ -829,6 +975,138 @@ class ControlCommand(Enum):
     PAUSE = "pause"
     SET_SPEED = "set_speed"
     RESET = "reset"
+    START_GA = "start_ga"
+    STOP_GA = "stop_ga"
+    GET_GA_STATUS = "get_ga_status"
+
+
+def _handle_start_ga(data: dict[str, Any]) -> dict[str, Any]:
+    """Handle start_ga command.
+
+    Args:
+        data: Command data with role, generations, and population_size.
+
+    Returns:
+        Response dict with success status and job_id or error message.
+    """
+    role = data.get("role", "")
+    generations = data.get("generations", 100)
+    population_size = data.get("population_size", 50)
+
+    if not role:
+        return {"success": False, "message": "Missing 'role' parameter"}
+
+    # Validate generations
+    try:
+        generations = int(generations)
+        if generations < 1 or generations > 1000:
+            return {
+                "success": False,
+                "message": "generations must be between 1 and 1000",
+            }
+    except (TypeError, ValueError):
+        return {"success": False, "message": "Invalid generations value"}
+
+    # Validate population_size
+    try:
+        population_size = int(population_size)
+        if population_size < 10 or population_size > 500:
+            return {
+                "success": False,
+                "message": "population_size must be between 10 and 500",
+            }
+    except (TypeError, ValueError):
+        return {"success": False, "message": "Invalid population_size value"}
+
+    ga_manager = get_ga_job_manager()
+    try:
+        job_id = ga_manager.create_job(
+            role=role,
+            generations=generations,
+            population_size=population_size,
+        )
+        logger.info("Started GA job %s for role=%s via WebSocket", job_id, role)
+        return {
+            "success": True,
+            "message": f"GA evolution started for role '{role}'",
+            "job_id": job_id,
+        }
+    except ValueError as e:
+        return {"success": False, "message": str(e)}
+
+
+def _handle_stop_ga(data: dict[str, Any]) -> dict[str, Any]:
+    """Handle stop_ga command.
+
+    Args:
+        data: Command data (optional job_id).
+
+    Returns:
+        Response dict with success status.
+    """
+    ga_manager = get_ga_job_manager()
+    job_id = data.get("job_id")
+
+    if job_id:
+        # Stop specific job
+        stopped = ga_manager.stop_job(job_id)
+        if stopped:
+            return {"success": True, "message": f"Stop requested for job {job_id}"}
+        return {
+            "success": False,
+            "message": f"Job {job_id} not found or not running",
+        }
+
+    # Stop any running job
+    running_job = ga_manager.get_running_job()
+    if running_job:
+        ga_manager.stop_job(running_job.job_id)
+        return {
+            "success": True,
+            "message": f"Stop requested for job {running_job.job_id}",
+        }
+
+    return {"success": False, "message": "No GA job is currently running"}
+
+
+def _handle_get_ga_status(data: dict[str, Any]) -> dict[str, Any]:
+    """Handle get_ga_status command.
+
+    Args:
+        data: Command data (optional job_id).
+
+    Returns:
+        Response dict with job status information.
+    """
+    ga_manager = get_ga_job_manager()
+    job_id = data.get("job_id")
+
+    if job_id:
+        # Get specific job
+        job = ga_manager.get_job(job_id)
+        if job is None:
+            return {"success": False, "message": f"Job {job_id} not found"}
+    else:
+        # Get running job
+        job = ga_manager.get_running_job()
+        if job is None:
+            return {"success": True, "message": "No GA job is currently running", "status": None}
+
+    # Handle -inf which is not JSON serializable
+    best_fitness: float | None = job.best_fitness
+    if math.isinf(best_fitness):
+        best_fitness = None if best_fitness < 0 else float("inf")
+
+    return {
+        "success": True,
+        "job_id": job.job_id,
+        "status": job.status.value,
+        "role": job.role,
+        "current_generation": job.current_generation,
+        "total_generations": job.generations,
+        "best_fitness": best_fitness,
+        "best_genome": job.best_genome,
+    }
 
 
 @app.websocket("/ws/control")
@@ -840,6 +1118,13 @@ async def websocket_control(websocket: WebSocket) -> None:
     - {"type": "pause"} - Pause simulation
     - {"type": "set_speed", "speed": 2.0} - Set speed multiplier
     - {"type": "reset"} - Reset world to initial state
+    - {"type": "start_ga", "role": string, "generations": number} - Start GA
+    - {"type": "stop_ga"} - Stop running GA (optional job_id)
+    - {"type": "get_ga_status"} - Get GA status (optional job_id)
+
+    Server broadcasts:
+    - {"type": "ga_progress", "job_id": string, "generation": number, "best_fitness": number}
+    - {"type": "ga_complete", "job_id": string, "best_genome": object}
     """
     await manager.connect_control(websocket)
     sim = get_sim_state()
@@ -867,6 +1152,12 @@ async def websocket_control(websocket: WebSocket) -> None:
             elif cmd_type == "reset":
                 sim.reset()
                 response = {"success": True, "message": "World reset"}
+            elif cmd_type == "start_ga":
+                response = _handle_start_ga(data)
+            elif cmd_type == "stop_ga":
+                response = _handle_stop_ga(data)
+            elif cmd_type == "get_ga_status":
+                response = _handle_get_ga_status(data)
             else:
                 response = {"success": False, "message": f"Unknown command: {cmd_type}"}
 
