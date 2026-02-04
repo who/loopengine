@@ -208,6 +208,194 @@ class TestGAEngineSelection:
             ga_engine.select()
 
 
+class TestGAEngineSelectionAdvanced:
+    """Test advanced selection mechanisms (tournament, ratio)."""
+
+    def test_selection_ratio_calculates_k(
+        self,
+        sandwich_maker_schema: GenomeSchema,
+        simple_fitness_fn,
+    ) -> None:
+        """Test selection_ratio computes correct survivor count."""
+        ga = GAEngine(population_size=20, selection_count=None, selection_ratio=0.3)
+        ga.initialize_population(sandwich_maker_schema)
+        ga.evaluate_population(simple_fitness_fn)
+
+        survivors = ga.select()
+
+        # 0.3 * 20 = 6 survivors
+        assert len(survivors) == 6
+
+    def test_selection_ratio_minimum_one(
+        self,
+        sandwich_maker_schema: GenomeSchema,
+        simple_fitness_fn,
+    ) -> None:
+        """Test selection_ratio returns at least 1 survivor."""
+        ga = GAEngine(population_size=10, selection_count=None, selection_ratio=0.01)
+        ga.initialize_population(sandwich_maker_schema)
+        ga.evaluate_population(simple_fitness_fn)
+
+        survivors = ga.select()
+
+        # Even with tiny ratio, at least 1 should survive
+        assert len(survivors) >= 1
+
+    def test_selection_count_overrides_ratio(
+        self,
+        sandwich_maker_schema: GenomeSchema,
+        simple_fitness_fn,
+    ) -> None:
+        """Test selection_count takes precedence over selection_ratio."""
+        ga = GAEngine(population_size=20, selection_count=5, selection_ratio=0.5)
+        ga.initialize_population(sandwich_maker_schema)
+        ga.evaluate_population(simple_fitness_fn)
+
+        survivors = ga.select()
+
+        # selection_count should override ratio (5 not 10)
+        assert len(survivors) == 5
+
+    def test_tournament_selection_returns_k(
+        self,
+        sandwich_maker_schema: GenomeSchema,
+        simple_fitness_fn,
+    ) -> None:
+        """Test tournament selection returns correct number of survivors."""
+        ga = GAEngine(
+            population_size=20, selection_count=5, selection_type="tournament", tournament_size=3
+        )
+        ga.initialize_population(sandwich_maker_schema)
+        ga.evaluate_population(simple_fitness_fn)
+
+        survivors = ga.select()
+
+        assert len(survivors) == 5
+
+    def test_tournament_selection_produces_valid_genomes(
+        self,
+        sandwich_maker_schema: GenomeSchema,
+        simple_fitness_fn,
+    ) -> None:
+        """Test tournament selection returns genomes from population."""
+        ga = GAEngine(
+            population_size=10, selection_count=3, selection_type="tournament", tournament_size=2
+        )
+        ga.initialize_population(sandwich_maker_schema)
+        ga.evaluate_population(simple_fitness_fn)
+
+        survivors = ga.select()
+
+        # Each survivor should have all expected traits
+        expected_traits = set(sandwich_maker_schema.traits.keys())
+        for survivor in survivors:
+            assert set(survivor.keys()) == expected_traits
+
+    def test_tournament_selection_sorted_by_fitness(
+        self,
+        sandwich_maker_schema: GenomeSchema,
+        simple_fitness_fn,
+    ) -> None:
+        """Test tournament selection returns survivors sorted by fitness."""
+        ga = GAEngine(
+            population_size=20, selection_count=5, selection_type="tournament", tournament_size=4
+        )
+        ga.initialize_population(sandwich_maker_schema)
+        ga.evaluate_population(simple_fitness_fn)
+
+        survivors = ga.select()
+        survivor_fitnesses = [simple_fitness_fn(g) for g in survivors]
+
+        # Should be sorted descending
+        assert survivor_fitnesses == sorted(survivor_fitnesses, reverse=True)
+
+    def test_rank_selection_sorted_by_fitness(
+        self,
+        sandwich_maker_schema: GenomeSchema,
+        simple_fitness_fn,
+    ) -> None:
+        """Test rank selection returns survivors sorted by fitness (best first)."""
+        ga = GAEngine(population_size=20, selection_count=5, selection_type="rank")
+        ga.initialize_population(sandwich_maker_schema)
+        ga.evaluate_population(simple_fitness_fn)
+
+        survivors = ga.select()
+        survivor_fitnesses = [simple_fitness_fn(g) for g in survivors]
+
+        # Should be sorted descending
+        assert survivor_fitnesses == sorted(survivor_fitnesses, reverse=True)
+
+    def test_tournament_with_ratio(
+        self,
+        sandwich_maker_schema: GenomeSchema,
+        simple_fitness_fn,
+    ) -> None:
+        """Test tournament selection works with selection_ratio."""
+        ga = GAEngine(
+            population_size=20,
+            selection_count=None,
+            selection_ratio=0.2,
+            selection_type="tournament",
+            tournament_size=3,
+        )
+        ga.initialize_population(sandwich_maker_schema)
+        ga.evaluate_population(simple_fitness_fn)
+
+        survivors = ga.select()
+
+        # 0.2 * 20 = 4 survivors
+        assert len(survivors) == 4
+
+    def test_handles_ties_gracefully(
+        self,
+        sandwich_maker_schema: GenomeSchema,
+    ) -> None:
+        """Test selection handles fitness ties consistently."""
+        ga = GAEngine(population_size=5, selection_count=3, selection_type="rank")
+        ga.initialize_population(sandwich_maker_schema)
+
+        # Set all fitness scores to same value (ties)
+        def constant_fitness(genome: dict[str, float]) -> float:
+            return 1.0
+
+        ga.evaluate_population(constant_fitness)
+        survivors = ga.select()
+
+        # Should still return 3 survivors even with ties
+        assert len(survivors) == 3
+
+    def test_tournament_handles_small_population(
+        self,
+        sandwich_maker_schema: GenomeSchema,
+        simple_fitness_fn,
+    ) -> None:
+        """Test tournament selection works when tournament_size > population."""
+        ga = GAEngine(
+            population_size=3, selection_count=2, selection_type="tournament", tournament_size=10
+        )
+        ga.initialize_population(sandwich_maker_schema)
+        ga.evaluate_population(simple_fitness_fn)
+
+        # Should not raise error
+        survivors = ga.select()
+        assert len(survivors) == 2
+
+    def test_default_selection_when_neither_count_nor_ratio(
+        self,
+        sandwich_maker_schema: GenomeSchema,
+        simple_fitness_fn,
+    ) -> None:
+        """Test default behavior when neither selection_count nor ratio is set."""
+        ga = GAEngine(population_size=10, selection_count=None, selection_ratio=None)
+        ga.initialize_population(sandwich_maker_schema)
+        ga.evaluate_population(simple_fitness_fn)
+
+        survivors = ga.select()
+
+        # Default is 20% of population = 2
+        assert len(survivors) == 2
+
+
 class TestGAEngineCrossover:
     """Test crossover operators."""
 

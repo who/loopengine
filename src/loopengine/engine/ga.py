@@ -35,7 +35,10 @@ class GAEngine:
 
     # Configuration
     population_size: int = 50
-    selection_count: int = 10  # Top K survivors
+    selection_count: int | None = 10  # Top K survivors (explicit count)
+    selection_ratio: float | None = None  # Alternative: fraction of population to select
+    selection_type: str = "rank"  # "rank" or "tournament"
+    tournament_size: int = 3  # Number of individuals per tournament
     mutation_rate: float = 0.1  # Per-trait mutation probability
     mutation_magnitude: float = 0.05  # Std dev for Gaussian mutation
     crossover_type: str = "uniform"  # "uniform" or "blended"
@@ -118,25 +121,95 @@ class GAEngine:
                 self.best_genome = self.population[i].copy()
 
     def select(self) -> list[dict[str, float]]:
-        """Select top K genomes for survival.
+        """Select survivors using configured selection method.
 
-        Uses rank selection: sorts population by fitness and takes
-        the top selection_count genomes.
+        Supports two selection strategies:
+        - rank: sorts population by fitness and takes the top K genomes
+        - tournament: runs K tournaments, each selecting best from random sample
+
+        K is determined by selection_count if set, otherwise
+        selection_ratio * population_size.
 
         Returns:
-            list[dict[str, float]]: Selected survivor genomes.
+            list[dict[str, float]]: Selected survivor genomes, sorted by fitness (best first).
         """
         if not self.fitness_scores:
             msg = "Population not evaluated - call evaluate_population first"
             raise ValueError(msg)
 
+        # Determine K (number of survivors)
+        k = self._get_selection_count()
+
+        # Select using configured strategy
+        if self.selection_type == "tournament":
+            survivors = self._tournament_select(k)
+        else:
+            survivors = self._rank_select(k)
+
+        return survivors
+
+    def _get_selection_count(self) -> int:
+        """Calculate number of survivors to select.
+
+        Uses selection_count if set, otherwise calculates from selection_ratio.
+
+        Returns:
+            int: Number of individuals to select.
+        """
+        if self.selection_count is not None:
+            return self.selection_count
+        if self.selection_ratio is not None:
+            return max(1, int(self.selection_ratio * len(self.population)))
+        # Default to 20% if nothing specified
+        return max(1, int(0.2 * len(self.population)))
+
+    def _rank_select(self, k: int) -> list[dict[str, float]]:
+        """Select top K genomes by fitness ranking.
+
+        Args:
+            k: Number of survivors to select.
+
+        Returns:
+            list[dict[str, float]]: Top K genomes sorted by fitness (best first).
+        """
         # Sort by fitness (descending)
         indexed = list(enumerate(self.fitness_scores))
         indexed.sort(key=lambda x: x[1], reverse=True)
 
         # Select top K
-        survivors = [self.population[i].copy() for i, _ in indexed[: self.selection_count]]
+        survivors = [self.population[i].copy() for i, _ in indexed[:k]]
         return survivors
+
+    def _tournament_select(self, k: int) -> list[dict[str, float]]:
+        """Select K individuals via tournament selection.
+
+        Runs K tournaments. Each tournament randomly samples tournament_size
+        individuals and selects the one with highest fitness.
+
+        Args:
+            k: Number of survivors to select.
+
+        Returns:
+            list[dict[str, float]]: Selected genomes sorted by fitness (best first).
+        """
+        winners: list[tuple[dict[str, float], float]] = []
+        population_size = len(self.population)
+
+        for _ in range(k):
+            # Random sample of indices for this tournament
+            tournament_indices = random.sample(
+                range(population_size), min(self.tournament_size, population_size)
+            )
+
+            # Find best in tournament
+            best_idx = max(tournament_indices, key=lambda i: self.fitness_scores[i])
+            winner_genome = self.population[best_idx].copy()
+            winner_fitness = self.fitness_scores[best_idx]
+            winners.append((winner_genome, winner_fitness))
+
+        # Sort by fitness (best first) and return genomes only
+        winners.sort(key=lambda x: x[1], reverse=True)
+        return [genome for genome, _ in winners]
 
     def crossover(self, parent1: dict[str, float], parent2: dict[str, float]) -> dict[str, float]:
         """Produce offspring by combining two parent genomes.
