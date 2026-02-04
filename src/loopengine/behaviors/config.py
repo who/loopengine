@@ -133,6 +133,20 @@ class LLMConfig(BaseSettings):
         description="Rate limit strategy: retry_with_backoff, fallback_immediately",
     )
 
+    # Concurrency settings for parallel agent decisions (NFR-004)
+    max_concurrent_requests: int = Field(
+        default=50,
+        ge=1,
+        le=200,
+        description="Maximum concurrent LLM requests (default 50 for NFR-004)",
+    )
+    request_queue_size: int = Field(
+        default=100,
+        ge=10,
+        le=1000,
+        description="Size of request queue for pending behavior requests",
+    )
+
     @field_validator("llm_provider", mode="before")
     @classmethod
     def normalize_provider(cls, v: Any) -> LLMProvider:
@@ -192,6 +206,7 @@ class LLMConfig(BaseSettings):
             f"temperature={self.llm_temperature}, "
             f"timeout={self.llm_timeout}s, "
             f"cache_ttl={self.behavior_cache_ttl}s, "
+            f"max_concurrent={self.max_concurrent_requests}, "
             f"anthropic_key={'*****' if self.anthropic_api_key else 'not set'}, "
             f"openai_key={'*****' if self.openai_api_key else 'not set'}"
             f")"

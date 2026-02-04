@@ -2,9 +2,12 @@
 
 This module provides fallback behaviors when LLM is unavailable due to
 network issues, rate limits, API errors, or timeouts. Covers FR-004.
+
+Thread-safe for concurrent access to behavior cache.
 """
 
 import logging
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -30,6 +33,9 @@ class FallbackBehavior:
     Manages default actions per agent type and optional behavior caching
     for graceful degradation during LLM unavailability.
 
+    Thread-safe: All cache operations are protected by a lock for
+    safe concurrent access from multiple agent threads.
+
     Example:
         >>> fallback = FallbackBehavior()
         >>> fallback.register_default("florist", "arrange_flowers")
@@ -53,6 +59,9 @@ class FallbackBehavior:
 
         # Custom fallback handlers per agent type
         self._custom_handlers: dict[str, Callable[[str, dict[str, Any]], BehaviorResponse]] = {}
+
+        # Lock for thread-safe cache access
+        self._lock = threading.RLock()
 
     def register_default(
         self,
@@ -99,7 +108,7 @@ class FallbackBehavior:
         """Cache a successful behavior response for potential reuse.
 
         Cached behaviors can be used as fallbacks before resorting to
-        default actions.
+        default actions. Thread-safe.
 
         Args:
             agent_type: The type of agent.
@@ -107,7 +116,8 @@ class FallbackBehavior:
             response: The successful behavior response to cache.
         """
         cache_key = f"{agent_type}:{agent_id}"
-        self._behavior_cache[cache_key] = response
+        with self._lock:
+            self._behavior_cache[cache_key] = response
         logger.debug("Cached behavior for %s", cache_key)
 
     def get_cached_behavior(
@@ -117,6 +127,8 @@ class FallbackBehavior:
     ) -> BehaviorResponse | None:
         """Get a cached behavior response if available.
 
+        Thread-safe.
+
         Args:
             agent_type: The type of agent.
             agent_id: Unique identifier for the agent instance.
@@ -125,10 +137,13 @@ class FallbackBehavior:
             Cached BehaviorResponse or None if not found.
         """
         cache_key = f"{agent_type}:{agent_id}"
-        return self._behavior_cache.get(cache_key)
+        with self._lock:
+            return self._behavior_cache.get(cache_key)
 
     def clear_cache(self, agent_type: str | None = None) -> int:
         """Clear cached behaviors.
+
+        Thread-safe.
 
         Args:
             agent_type: If provided, only clear cache for this agent type.
@@ -137,18 +152,19 @@ class FallbackBehavior:
         Returns:
             Number of cache entries cleared.
         """
-        if agent_type is None:
-            count = len(self._behavior_cache)
-            self._behavior_cache.clear()
-            logger.info("Cleared all %d cached behaviors", count)
-            return count
+        with self._lock:
+            if agent_type is None:
+                count = len(self._behavior_cache)
+                self._behavior_cache.clear()
+                logger.info("Cleared all %d cached behaviors", count)
+                return count
 
-        keys_to_remove = [k for k in self._behavior_cache if k.startswith(f"{agent_type}:")]
-        for key in keys_to_remove:
-            del self._behavior_cache[key]
-        count = len(keys_to_remove)
-        logger.info("Cleared %d cached behaviors for agent type '%s'", count, agent_type)
-        return count
+            keys_to_remove = [k for k in self._behavior_cache if k.startswith(f"{agent_type}:")]
+            for key in keys_to_remove:
+                del self._behavior_cache[key]
+            count = len(keys_to_remove)
+            logger.info("Cleared %d cached behaviors for agent type '%s'", count, agent_type)
+            return count
 
     def get_fallback(
         self,
@@ -284,8 +300,9 @@ class FallbackBehavior:
 
     @property
     def cache_size(self) -> int:
-        """Get the current number of cached behaviors."""
-        return len(self._behavior_cache)
+        """Get the current number of cached behaviors. Thread-safe."""
+        with self._lock:
+            return len(self._behavior_cache)
 
 
 def classify_error(error: Exception) -> str:

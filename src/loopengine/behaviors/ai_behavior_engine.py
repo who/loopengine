@@ -3,11 +3,14 @@
 This module provides the main AIBehaviorEngine class that coordinates
 domain context, prompt building, LLM querying, and response parsing
 into a cohesive behavior generation flow.
+
+Supports concurrent agent decisions (NFR-004: 50+ agents) via thread pool.
 """
 
 import logging
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 from loopengine.behaviors.config import LLMConfig, LLMProvider, get_llm_config
@@ -38,7 +41,8 @@ class AIBehaviorEngine:
     to generate agent behaviors from simulation context.
 
     Thread-safe for concurrent agent decisions through internal locking on
-    shared resources.
+    shared resources. Supports 50+ concurrent agents via ThreadPoolExecutor
+    (NFR-004 compliance).
 
     Example:
         >>> engine = AIBehaviorEngine()
@@ -53,6 +57,13 @@ class AIBehaviorEngine:
         >>> context = {"pending_orders": 3}
         >>> response = engine.generate_behavior(domain, agent, context)
         >>> print(response.action)
+
+        # Batch concurrent requests for 50+ agents
+        >>> futures = engine.generate_behaviors_async([
+        ...     (domain, agent1, context1, "agent1"),
+        ...     (domain, agent2, context2, "agent2"),
+        ... ])
+        >>> responses = [f.result() for f in futures]
     """
 
     def __init__(
@@ -91,10 +102,16 @@ class AIBehaviorEngine:
         # Lock for thread-safe access to shared state
         self._lock = threading.Lock()
 
+        # Thread pool for concurrent requests (NFR-004: 50+ agents)
+        self._executor: ThreadPoolExecutor | None = None
+        self._executor_lock = threading.Lock()
+
         # Metrics tracking
         self._total_queries = 0
         self._total_latency_ms = 0.0
         self._rate_limit_events = 0
+        self._concurrent_requests = 0
+        self._peak_concurrent_requests = 0
 
     def _create_llm_client(self) -> LLMClient:
         """Create an LLM client based on configuration.
@@ -118,6 +135,50 @@ class AIBehaviorEngine:
         else:
             raise AIBehaviorEngineError(f"Unknown provider: {provider}")
 
+    def _get_executor(self) -> ThreadPoolExecutor:
+        """Get or create the thread pool executor.
+
+        Creates executor lazily on first use.
+
+        Returns:
+            ThreadPoolExecutor configured for max_concurrent_requests.
+        """
+        if self._executor is None:
+            with self._executor_lock:
+                # Double-check after acquiring lock
+                if self._executor is None:
+                    self._executor = ThreadPoolExecutor(
+                        max_workers=self._config.max_concurrent_requests,
+                        thread_name_prefix="behavior_worker",
+                    )
+                    logger.info(
+                        "Created thread pool with %d workers for concurrent behavior generation",
+                        self._config.max_concurrent_requests,
+                    )
+        return self._executor
+
+    def shutdown(self, wait: bool = True) -> None:
+        """Shutdown the thread pool executor.
+
+        Call this when done using the engine to clean up resources.
+
+        Args:
+            wait: If True, wait for pending tasks to complete.
+        """
+        with self._executor_lock:
+            if self._executor is not None:
+                logger.info("Shutting down behavior engine thread pool")
+                self._executor.shutdown(wait=wait)
+                self._executor = None
+
+    def __enter__(self) -> "AIBehaviorEngine":
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Context manager exit - ensures executor shutdown."""
+        self.shutdown(wait=True)
+
     def generate_behavior(
         self,
         domain: DomainContext,
@@ -133,7 +194,7 @@ class AIBehaviorEngine:
         3. Parsing and validating the response
         4. Falling back to cached/default behavior on rate limit exhaustion
 
-        Thread-safe for concurrent calls.
+        Thread-safe for concurrent calls. Supports 50+ concurrent agent decisions.
 
         Args:
             domain: Domain configuration with type and description.
@@ -149,6 +210,12 @@ class AIBehaviorEngine:
             AIBehaviorEngineError: If behavior generation fails fatally.
         """
         start_time = time.perf_counter()
+
+        # Track concurrent requests for metrics
+        with self._lock:
+            self._concurrent_requests += 1
+            if self._concurrent_requests > self._peak_concurrent_requests:
+                self._peak_concurrent_requests = self._concurrent_requests
 
         try:
             # Build the prompt
@@ -263,6 +330,11 @@ class AIBehaviorEngine:
             )
             raise AIBehaviorEngineError(f"Failed to generate behavior: {e}") from e
 
+        finally:
+            # Always decrement concurrent request count
+            with self._lock:
+                self._concurrent_requests -= 1
+
     def _get_rate_limit_exceptions(self) -> tuple[type[Exception], ...]:
         """Get the exception types that indicate rate limiting for the current provider.
 
@@ -274,6 +346,114 @@ class AIBehaviorEngine:
         from openai import RateLimitError as OpenAIRateLimitError
 
         return (AnthropicRateLimitError, OpenAIRateLimitError)
+
+    def generate_behavior_async(
+        self,
+        domain: DomainContext,
+        agent: AgentContext,
+        context: dict[str, Any] | None = None,
+        agent_id: str | None = None,
+    ) -> Future[BehaviorResponse]:
+        """Submit a behavior generation request to the thread pool.
+
+        Non-blocking. Returns a Future that will contain the result.
+
+        Args:
+            domain: Domain configuration with type and description.
+            agent: Agent information with type and role.
+            context: Optional state context dict.
+            agent_id: Optional unique agent ID for cache lookup on fallback.
+
+        Returns:
+            Future that will contain the BehaviorResponse when complete.
+        """
+        executor = self._get_executor()
+        return executor.submit(self.generate_behavior, domain, agent, context, agent_id)
+
+    def generate_behaviors_async(
+        self,
+        requests: list[tuple[DomainContext, AgentContext, dict[str, Any] | None, str | None]],
+    ) -> list[Future[BehaviorResponse]]:
+        """Submit multiple behavior generation requests concurrently.
+
+        Designed for NFR-004: supports 50+ concurrent agent decisions.
+
+        Args:
+            requests: List of tuples (domain, agent, context, agent_id).
+
+        Returns:
+            List of Futures in the same order as requests.
+
+        Example:
+            >>> futures = engine.generate_behaviors_async([
+            ...     (domain, agent1, ctx1, "agent1"),
+            ...     (domain, agent2, ctx2, "agent2"),
+            ... ])
+            >>> responses = [f.result() for f in futures]
+        """
+        executor = self._get_executor()
+        futures: list[Future[BehaviorResponse]] = []
+
+        for domain, agent, context, agent_id in requests:
+            future = executor.submit(self.generate_behavior, domain, agent, context, agent_id)
+            futures.append(future)
+
+        logger.info(
+            "Submitted %d concurrent behavior requests (max workers: %d)",
+            len(futures),
+            self._config.max_concurrent_requests,
+        )
+        return futures
+
+    def generate_behaviors_batch(
+        self,
+        requests: list[tuple[DomainContext, AgentContext, dict[str, Any] | None, str | None]],
+        timeout: float | None = None,
+    ) -> list[BehaviorResponse]:
+        """Generate behaviors for multiple agents concurrently, waiting for all to complete.
+
+        Convenience method that submits all requests and waits for results.
+
+        Args:
+            requests: List of tuples (domain, agent, context, agent_id).
+            timeout: Maximum time to wait for all results (seconds). None = no timeout.
+
+        Returns:
+            List of BehaviorResponses in the same order as requests.
+
+        Raises:
+            AIBehaviorEngineError: If any request fails or times out.
+        """
+        from concurrent.futures import TimeoutError, wait
+
+        futures = self.generate_behaviors_async(requests)
+
+        try:
+            # Wait for all futures to complete
+            _done, not_done = wait(futures, timeout=timeout)
+
+            if not_done:
+                # Cancel any pending futures and raise error
+                for f in not_done:
+                    f.cancel()
+                incomplete = len(not_done)
+                total = len(futures)
+                raise AIBehaviorEngineError(
+                    f"Batch request timed out: {incomplete} of {total} requests incomplete"
+                )
+
+            # Collect results in original order
+            results: list[BehaviorResponse] = []
+            for future in futures:
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    raise AIBehaviorEngineError(f"Batch request failed: {e}") from e
+
+            return results
+
+        except TimeoutError as e:
+            raise AIBehaviorEngineError(f"Batch request timed out after {timeout}s") from e
 
     def parse_raw_response(self, raw_response: str) -> BehaviorResponse:
         """Parse a raw LLM response into a BehaviorResponse.
@@ -302,7 +482,7 @@ class AIBehaviorEngine:
 
         Returns:
             Dict with total_queries, total_latency_ms, avg_latency_ms,
-            rate_limit_events, and rate limit handler stats.
+            rate_limit_events, concurrency stats, and rate limit handler stats.
         """
         with self._lock:
             avg_latency = (
@@ -315,6 +495,9 @@ class AIBehaviorEngine:
                 "avg_latency_ms": round(avg_latency, 2),
                 "provider": self._config.llm_provider.value,
                 "rate_limit_events": self._rate_limit_events,
+                "concurrent_requests": self._concurrent_requests,
+                "peak_concurrent_requests": self._peak_concurrent_requests,
+                "max_concurrent_limit": self._config.max_concurrent_requests,
                 "rate_limit_stats": rate_limit_stats,
             }
 
@@ -327,6 +510,7 @@ class AIBehaviorEngine:
             self._total_queries = 0
             self._total_latency_ms = 0.0
             self._rate_limit_events = 0
+            self._peak_concurrent_requests = 0
             self._rate_limit_handler.clear_events()
 
     @property
@@ -338,3 +522,14 @@ class AIBehaviorEngine:
     def fallback(self) -> FallbackBehavior:
         """Get the fallback behavior manager for configuration."""
         return self._fallback
+
+    @property
+    def concurrent_requests(self) -> int:
+        """Get the current number of concurrent requests in flight."""
+        with self._lock:
+            return self._concurrent_requests
+
+    @property
+    def max_concurrent_requests(self) -> int:
+        """Get the configured maximum concurrent requests."""
+        return self._config.max_concurrent_requests
