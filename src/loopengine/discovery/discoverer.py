@@ -437,14 +437,6 @@ class Discoverer:
                 )
                 traits[trait.name] = trait
 
-            schema = GenomeSchema(
-                role=role_name,
-                traits=traits,
-                discovered_at=discovered_at,
-                discovery_prompt=discovery_prompt,
-                version=1,
-            )
-
             # Validate and clamp flexibility score to 0.0-1.0
             raw_flexibility = float(role_data.get("flexibility_score", 0.5))
             flexibility = max(0.0, min(1.0, raw_flexibility))
@@ -455,6 +447,15 @@ class Discoverer:
                     role_name,
                     flexibility,
                 )
+
+            schema = GenomeSchema(
+                role=role_name,
+                traits=traits,
+                discovered_at=discovered_at,
+                discovery_prompt=discovery_prompt,
+                version=1,
+                flexibility_score=flexibility,
+            )
 
             result.roles[role_name] = DiscoveredRole(
                 schema=schema,

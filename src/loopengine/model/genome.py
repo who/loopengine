@@ -36,3 +36,4 @@ class GenomeSchema:
     discovered_at: datetime = field(default_factory=datetime.now)
     discovery_prompt: str = ""
     version: int = 1
+    flexibility_score: float = 0.5  # 0.0 (predictable inputs) to 1.0 (unpredictable)

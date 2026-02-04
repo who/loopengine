@@ -165,3 +165,48 @@ def _update_force_layout(world: World) -> None:
     Computes forces on all agents and updates their positions each tick.
     """
     update_layout(world)
+
+
+def tick_world_with_flexibility(
+    world: World,
+    flexibility_by_role: dict[str, float] | None = None,
+) -> bool:
+    """Execute one simulation tick with flexibility-based perturbations.
+
+    This enhanced tick function injects random perturbations based on the
+    flexibility scores of roles in the simulation. Higher flexibility roles
+    will experience more perturbations/surprises.
+
+    Args:
+        world: The world to advance.
+        flexibility_by_role: Optional dict mapping role names to flexibility scores.
+                           If None, uses flexibility from world.schemas.
+
+    Returns:
+        True if any perturbation was injected this tick.
+
+    Side effects:
+        Same as tick_world, plus potential perturbation injections.
+    """
+    from loopengine.engine.flexibility import inject_perturbation
+
+    # Calculate average flexibility for perturbation probability
+    if flexibility_by_role is None:
+        flexibility_by_role = {
+            role: schema.flexibility_score for role, schema in world.schemas.items()
+        }
+
+    # Use max flexibility across roles for perturbation chance
+    # This ensures high-flexibility roles get their expected surprises
+    if flexibility_by_role:
+        max_flexibility = max(flexibility_by_role.values())
+    else:
+        max_flexibility = 0.5  # Default if no schemas
+
+    # Inject perturbation based on flexibility
+    perturbation_injected = inject_perturbation(world, max_flexibility)
+
+    # Run normal tick
+    tick_world(world)
+
+    return perturbation_injected
