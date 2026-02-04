@@ -228,8 +228,12 @@ class TestFrontendUIRendering:
         """Verify canvas renders agents from simulation."""
         self.page.goto("http://localhost:8080/frontend/index.html")
 
+        # Ensure simulation is playing (may have been paused by previous tests)
+        self.page.request.post("http://localhost:8000/api/world/play")
+
         # Poll for frame with agents (may take a moment for server to send valid frame)
-        max_wait_ms = 10000
+        # CI runners can be slow, so use a generous timeout
+        max_wait_ms = 15000
         poll_interval_ms = 500
         elapsed_ms = 0
         latest_frame = None
