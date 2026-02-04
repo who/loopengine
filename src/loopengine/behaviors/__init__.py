@@ -1,5 +1,10 @@
 """AI behavior system for dynamic LLM-driven agent behaviors."""
 
+from loopengine.behaviors.agent_type_extractor import (
+    AgentType,
+    AgentTypeExtractor,
+    AgentTypeExtractorError,
+)
 from loopengine.behaviors.ai_behavior_engine import (
     AIBehaviorEngine,
     AIBehaviorEngineError,
@@ -42,6 +47,9 @@ __all__ = [
     "AIBehaviorEngine",
     "AIBehaviorEngineError",
     "AgentContext",
+    "AgentType",
+    "AgentTypeExtractor",
+    "AgentTypeExtractorError",
     "AgentTypeSchema",
     "BehaviorResponse",
     "DomainContext",
