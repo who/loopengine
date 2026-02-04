@@ -261,6 +261,11 @@
             viewport.offsetY = height / 2 - centerY * viewport.scale;
         }
 
+        // Draw links using the links module (underneath agents)
+        if (typeof LoopEngineLinks !== 'undefined') {
+            LoopEngineLinks.renderLinks(ctx, frame.links, animationTime, viewport);
+        }
+
         // Draw agents using the agents module
         if (typeof LoopEngineAgents !== 'undefined') {
             LoopEngineAgents.renderAgents(ctx, frame.agents, animationTime, viewport);
