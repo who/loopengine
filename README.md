@@ -29,7 +29,7 @@ uv sync
 uv run uvicorn loopengine.server.app:app --port 8000
 
 # Terminal 2: Serve the frontend (from project root)
-python -m http.server 8080
+uv run python -m http.server 8080
 
 # Open the visualizer
 open http://localhost:8080/frontend/index.html
