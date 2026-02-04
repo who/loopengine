@@ -6,6 +6,7 @@ import random
 import uuid
 from typing import TYPE_CHECKING
 
+from loopengine.engine.forces import update_layout
 from loopengine.engine.loop import step_agent
 from loopengine.model.particle import Particle
 
@@ -22,7 +23,7 @@ def tick_world(world: World) -> None:
     3. Advance all particles (progress += speed)
     4. Deliver particles where progress >= 1.0
     5. Garbage collect dead particles
-    6. Update force layout (stub for now)
+    6. Update force-directed layout (compute forces, update positions)
     7. Increment world.tick and world.time
 
     Args:
@@ -161,8 +162,6 @@ def _garbage_collect_particles(world: World) -> None:
 def _update_force_layout(world: World) -> None:
     """Update force-directed layout for agent positions.
 
-    This is a stub implementation. Full force layout will be implemented
-    in a separate task (loopengine-jn1).
+    Computes forces on all agents and updates their positions each tick.
     """
-    # No-op for now - full implementation in forces.py
-    pass
+    update_layout(world)
