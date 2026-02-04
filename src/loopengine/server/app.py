@@ -32,11 +32,15 @@ from loopengine.discovery import Discoverer, DiscoveryError, migrate_genome
 from loopengine.engine.fitness import alex_fitness, maria_fitness, tom_fitness
 from loopengine.engine.ga import GAEngine
 from loopengine.engine.simulation import tick_world
+from loopengine.logging_config import configure_logging
 from loopengine.model.genome import GenomeSchema, GenomeTrait
 from loopengine.projection.projector import Frame, project
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
+
+# Configure logging at module import time (before any logging calls)
+configure_logging()
 
 logger = logging.getLogger(__name__)
 

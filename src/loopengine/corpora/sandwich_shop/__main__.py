@@ -12,6 +12,7 @@ import sys
 
 from loopengine.corpora.sandwich_shop import create_world
 from loopengine.engine import tick_world
+from loopengine.logging_config import configure_logging
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -60,6 +61,9 @@ def print_state_summary(world) -> None:
 def main(argv: list[str] | None = None) -> int:
     """Run the sandwich shop simulation."""
     args = parse_args(argv)
+
+    # Configure logging before any other operations
+    configure_logging()
 
     print(f"Starting Sandwich Shop simulation for {args.ticks} ticks...")
     print("=" * 70)

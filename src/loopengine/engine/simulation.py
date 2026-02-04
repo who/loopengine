@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import random
 import uuid
 from typing import TYPE_CHECKING
@@ -12,6 +13,8 @@ from loopengine.model.particle import Particle
 
 if TYPE_CHECKING:
     from loopengine.model.world import ExternalInput, World
+
+logger = logging.getLogger(__name__)
 
 
 def tick_world(world: World) -> None:
@@ -56,6 +59,15 @@ def tick_world(world: World) -> None:
     # 7. Increment world.tick and world.time
     world.tick += 1
     world.time += 1.0 / world.speed
+
+    # Debug log every 100 ticks to avoid log spam
+    if world.tick % 100 == 0:
+        logger.debug(
+            "Simulation tick %d: agents=%d, particles=%d",
+            world.tick,
+            len(world.agents),
+            len(world.particles),
+        )
 
 
 def _generate_external_inputs(world: World) -> None:
