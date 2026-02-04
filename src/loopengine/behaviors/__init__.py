@@ -16,6 +16,10 @@ from loopengine.behaviors.prompt_builder import (
     DomainContext,
     PromptBuilder,
 )
+from loopengine.behaviors.response_parser import (
+    ResponseParser,
+    ResponseParserError,
+)
 
 __all__ = [
     "AgentContext",
@@ -27,5 +31,7 @@ __all__ = [
     "LLMProvider",
     "LLMQuery",
     "PromptBuilder",
+    "ResponseParser",
+    "ResponseParserError",
     "get_llm_config",
 ]
