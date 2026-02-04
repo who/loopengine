@@ -28,6 +28,7 @@ from loopengine.api.behaviors import router as behaviors_router
 from loopengine.api.domains import router as domains_router
 from loopengine.api.metrics import router as metrics_router
 from loopengine.corpora.sandwich_shop import create_world
+from loopengine.discovery import Discoverer, DiscoveryError, migrate_genome
 from loopengine.engine.fitness import alex_fitness, maria_fitness, tom_fitness
 from loopengine.engine.ga import GAEngine
 from loopengine.engine.simulation import tick_world
@@ -422,6 +423,209 @@ def get_ga_job_manager() -> GAJobManager:
     return _ga_job_manager
 
 
+# Discovery Job Management
+
+
+class DiscoveryJobStatus(StrEnum):
+    """Status of a discovery job."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@dataclass
+class DiscoveryJob:
+    """Represents a genome discovery job."""
+
+    job_id: str
+    status: DiscoveryJobStatus = DiscoveryJobStatus.PENDING
+    system_description: dict[str, Any] = field(default_factory=dict)
+    discovered_schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
+    migrated_agent_count: int = 0
+    error_message: str = ""
+
+
+class DiscoveryJobManager:
+    """Thread-safe manager for discovery background jobs."""
+
+    def __init__(self) -> None:
+        """Initialize the discovery job manager."""
+        self._jobs: dict[str, DiscoveryJob] = {}
+        self._lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="discovery_worker")
+        self._complete_callback: Callable[[str, dict[str, GenomeSchema]], None] | None = None
+
+    def set_callbacks(
+        self,
+        complete_callback: Callable[[str, dict[str, GenomeSchema]], None] | None,
+    ) -> None:
+        """Set callback for discovery completion events.
+
+        Args:
+            complete_callback: Called with (job_id, schemas) when discovery completes.
+        """
+        self._complete_callback = complete_callback
+
+    def create_job(
+        self,
+        system_description: dict[str, Any],
+        sim_state: Any,
+    ) -> str:
+        """Create a new discovery job and start it in the background.
+
+        Args:
+            system_description: System description dict for AI discovery.
+            sim_state: SimulationState to apply migration results to.
+
+        Returns:
+            str: Job ID for status polling.
+        """
+        job_id = str(uuid.uuid4())
+        job = DiscoveryJob(
+            job_id=job_id,
+            system_description=system_description,
+        )
+
+        with self._lock:
+            self._jobs[job_id] = job
+
+        # Submit job to executor
+        self._executor.submit(self._run_discovery_job, job_id, sim_state)
+
+        return job_id
+
+    def get_job(self, job_id: str) -> DiscoveryJob | None:
+        """Get job by ID.
+
+        Args:
+            job_id: The job ID to look up.
+
+        Returns:
+            DiscoveryJob or None if not found.
+        """
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def get_running_job(self) -> DiscoveryJob | None:
+        """Get the currently running discovery job, if any.
+
+        Returns:
+            The running DiscoveryJob or None if no job is running.
+        """
+        with self._lock:
+            for job in self._jobs.values():
+                if job.status == DiscoveryJobStatus.RUNNING:
+                    return job
+            return None
+
+    def _run_discovery_job(self, job_id: str, sim_state: Any) -> None:
+        """Run discovery in background thread.
+
+        Args:
+            job_id: The job to run.
+            sim_state: SimulationState to apply migration results to.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            job.status = DiscoveryJobStatus.RUNNING
+
+        try:
+            # Run AI discovery
+            discoverer = Discoverer()
+            result = discoverer.discover(job.system_description)
+
+            # Extract schemas and apply migration to world
+            schemas: dict[str, GenomeSchema] = {}
+            migrated_count = 0
+
+            for role_name, discovered_role in result.roles.items():
+                schemas[role_name] = discovered_role.schema
+
+            # Apply schemas to world and migrate agents
+            with sim_state._lock:
+                # Update world schemas
+                for role_name, schema in schemas.items():
+                    sim_state._world.schemas[role_name] = schema
+
+                # Migrate agents with matching roles
+                for agent in sim_state._world.agents.values():
+                    if agent.role in schemas:
+                        new_schema = schemas[agent.role]
+                        migration_result = migrate_genome(agent.genome, new_schema)
+                        agent.genome = migration_result.migrated_genome
+                        migrated_count += 1
+                        logger.info(
+                            "Migrated agent %s: +%d traits, %d vestigial",
+                            agent.id,
+                            len(migration_result.added_traits),
+                            len(migration_result.vestigial_traits),
+                        )
+
+            # Update job with results
+            with self._lock:
+                job.status = DiscoveryJobStatus.COMPLETED
+                job.migrated_agent_count = migrated_count
+                # Convert schemas to serializable format
+                for role_name, schema in schemas.items():
+                    traits_list = []
+                    for trait in schema.traits.values():
+                        traits_list.append(
+                            {
+                                "name": trait.name,
+                                "description": trait.description,
+                                "min_val": trait.min_val,
+                                "max_val": trait.max_val,
+                                "category": trait.category,
+                            }
+                        )
+                    job.discovered_schemas[role_name] = {
+                        "role": role_name,
+                        "traits": traits_list,
+                        "version": schema.version,
+                    }
+
+            logger.info(
+                "Discovery job %s completed: %d roles, %d agents migrated",
+                job_id,
+                len(schemas),
+                migrated_count,
+            )
+
+            # Call complete callback
+            if self._complete_callback:
+                try:
+                    self._complete_callback(job_id, schemas)
+                except Exception as e:
+                    logger.warning("Discovery complete callback error: %s", e)
+
+        except DiscoveryError as e:
+            with self._lock:
+                job.status = DiscoveryJobStatus.FAILED
+                job.error_message = str(e)
+            logger.error("Discovery job %s failed: %s", job_id, e)
+        except Exception as e:
+            with self._lock:
+                job.status = DiscoveryJobStatus.FAILED
+                job.error_message = str(e)
+            logger.exception("Discovery job %s failed unexpectedly: %s", job_id, e)
+
+
+# Global discovery job manager
+_discovery_job_manager: DiscoveryJobManager | None = None
+
+
+def get_discovery_job_manager() -> DiscoveryJobManager:
+    """Get or create the global discovery job manager."""
+    global _discovery_job_manager
+    if _discovery_job_manager is None:
+        _discovery_job_manager = DiscoveryJobManager()
+    return _discovery_job_manager
+
+
 # Event loop for broadcasting from background threads
 _broadcast_loop: asyncio.AbstractEventLoop | None = None
 
@@ -600,6 +804,51 @@ class GAStatusResponse(BaseModel):
     )
 
 
+# Discovery API models
+
+
+class RoleDescription(BaseModel):
+    """Description of a role in the system."""
+
+    name: str = Field(description="Role name (e.g., 'owner', 'cashier')")
+    inputs: list[str] = Field(default_factory=list, description="Inputs the role receives")
+    outputs: list[str] = Field(default_factory=list, description="Outputs the role produces")
+    constraints: list[str] = Field(
+        default_factory=list, description="Constraints the role operates under"
+    )
+    links_to: list[str] = Field(
+        default_factory=list, description="Links to other roles (e.g., 'cashier (service)')"
+    )
+
+
+class DiscoveryRunRequest(BaseModel):
+    """Request model for starting a discovery run."""
+
+    system: str = Field(description="Description of the system being modeled")
+    roles: list[RoleDescription] = Field(description="List of role descriptions")
+
+
+class DiscoveryRunResponse(BaseModel):
+    """Response model for discovery run initiation."""
+
+    job_id: str = Field(description="Job ID for status polling")
+    message: str = Field(description="Status message")
+
+
+class DiscoveryStatusResponse(BaseModel):
+    """Response model for discovery job status."""
+
+    job_id: str = Field(description="Job ID")
+    status: str = Field(description="Job status: pending, running, completed, failed")
+    discovered_schemas: dict[str, dict[str, Any]] = Field(
+        default_factory=dict, description="Discovered schemas by role"
+    )
+    migrated_agent_count: int = Field(
+        default=0, description="Number of agents migrated to new schemas"
+    )
+    error_message: str = Field(default="", description="Error message if failed")
+
+
 # REST endpoints
 
 
@@ -687,21 +936,26 @@ async def get_links() -> list[LinkResponse]:
 
 @app.get("/api/schemas", response_model=list[SchemaResponse], tags=["schemas"])
 async def get_schemas() -> list[SchemaResponse]:
-    """Get all genome schemas."""
+    """Get all genome schemas.
+
+    Returns schemas discovered by AI or registered manually. Each schema
+    defines the meaningful traits for agents of that role.
+    """
     sim = get_sim_state()
     world = sim.world
     schemas = []
     for role, schema in world.schemas.items():
         # Convert schema to dict format
         traits = []
-        if hasattr(schema, "traits"):
-            for trait in schema.traits:
+        if hasattr(schema, "traits") and isinstance(schema.traits, dict):
+            for trait in schema.traits.values():
                 traits.append(
                     {
                         "name": trait.name,
-                        "min": trait.min_value,
-                        "max": trait.max_value,
-                        "default": trait.default,
+                        "description": trait.description,
+                        "min_val": trait.min_val,
+                        "max_val": trait.max_val,
+                        "category": trait.category,
                     }
                 )
         schemas.append(SchemaResponse(role=role, traits=traits))
@@ -841,6 +1095,92 @@ async def get_ga_status(job_id: str) -> GAStatusResponse:
         best_genome=job.best_genome,
         error_message=job.error_message,
         stats_history=job.stats_history,
+    )
+
+
+# Discovery endpoints
+
+
+@app.post("/api/discovery/run", response_model=DiscoveryRunResponse, tags=["discovery"])
+async def start_discovery_run(request: DiscoveryRunRequest) -> DiscoveryRunResponse:
+    """Start a genome discovery run in the background.
+
+    Runs AI-powered genome schema discovery asynchronously. The discoverer
+    analyzes the system description and infers appropriate genome traits for
+    each role, then migrates existing agents to the new schemas.
+
+    Returns a job_id that can be used to poll for status via
+    GET /api/discovery/status/{job_id}.
+
+    Args:
+        request: Discovery run request with system description and roles.
+
+    Returns:
+        DiscoveryRunResponse with job_id for status polling.
+    """
+    # Convert Pydantic models to dict format expected by discoverer
+    system_description = {
+        "system": request.system,
+        "roles": [
+            {
+                "name": role.name,
+                "inputs": role.inputs,
+                "outputs": role.outputs,
+                "constraints": role.constraints,
+                "links_to": role.links_to,
+            }
+            for role in request.roles
+        ],
+    }
+
+    discovery_manager = get_discovery_job_manager()
+    sim_state = get_sim_state()
+    job_id = discovery_manager.create_job(
+        system_description=system_description,
+        sim_state=sim_state,
+    )
+
+    logger.info("Started discovery job %s for system: %s", job_id, request.system)
+    return DiscoveryRunResponse(
+        job_id=job_id,
+        message=f"Discovery started for system '{request.system}'",
+    )
+
+
+@app.get(
+    "/api/discovery/status/{job_id}",
+    response_model=DiscoveryStatusResponse,
+    tags=["discovery"],
+)
+async def get_discovery_status(job_id: str) -> DiscoveryStatusResponse:
+    """Get status of a genome discovery job.
+
+    Poll this endpoint to check progress and retrieve results when complete.
+
+    Args:
+        job_id: The job ID returned from POST /api/discovery/run.
+
+    Returns:
+        DiscoveryStatusResponse with current status and discovered schemas.
+
+    Raises:
+        HTTPException: If job_id is not found.
+    """
+    discovery_manager = get_discovery_job_manager()
+    job = discovery_manager.get_job(job_id)
+
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Discovery job '{job_id}' not found",
+        )
+
+    return DiscoveryStatusResponse(
+        job_id=job.job_id,
+        status=job.status.value,
+        discovered_schemas=job.discovered_schemas,
+        migrated_agent_count=job.migrated_agent_count,
+        error_message=job.error_message,
     )
 
 

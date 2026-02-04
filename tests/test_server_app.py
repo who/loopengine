@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from loopengine.server.app import (
     ConnectionManager,
+    DiscoveryJobManager,
     GAJobManager,
     GAJobStatus,
     SimulationState,
@@ -896,3 +897,153 @@ class TestGAJobManagerStopFunctionality:
 
         # Stop the job
         manager.stop_job(job_id)
+
+
+class TestDiscoveryJobManager:
+    """Tests for DiscoveryJobManager class."""
+
+    def test_create_job(self) -> None:
+        """Test creating a discovery job."""
+        manager = DiscoveryJobManager()
+        sim_state = SimulationState()
+
+        system_description = {
+            "system": "Test system",
+            "roles": [{"name": "test_role", "inputs": [], "outputs": []}],
+        }
+
+        job_id = manager.create_job(
+            system_description=system_description,
+            sim_state=sim_state,
+        )
+
+        assert job_id is not None
+        assert len(job_id) > 0
+
+        job = manager.get_job(job_id)
+        assert job is not None
+        assert job.system_description == system_description
+
+    def test_get_job_not_found(self) -> None:
+        """Test getting a non-existent job returns None."""
+        manager = DiscoveryJobManager()
+        assert manager.get_job("nonexistent") is None
+
+    def test_get_running_job_none_initially(self) -> None:
+        """Test that no running job exists initially."""
+        manager = DiscoveryJobManager()
+        assert manager.get_running_job() is None
+
+
+class TestDiscoveryEndpoints:
+    """Tests for discovery REST API endpoints."""
+
+    def test_discovery_run_valid_request(self, client: TestClient) -> None:
+        """Test POST /api/discovery/run with valid request."""
+        response = client.post(
+            "/api/discovery/run",
+            json={
+                "system": "Test sandwich shop",
+                "roles": [
+                    {
+                        "name": "owner",
+                        "inputs": ["revenue_reports"],
+                        "outputs": ["directives"],
+                        "constraints": ["budget"],
+                        "links_to": ["cashier (hierarchical)"],
+                    },
+                    {
+                        "name": "cashier",
+                        "inputs": ["orders"],
+                        "outputs": ["tickets"],
+                        "constraints": [],
+                        "links_to": [],
+                    },
+                ],
+            },
+        )
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert "job_id" in data
+        assert len(data["job_id"]) > 0
+        assert "message" in data
+        assert "Test sandwich shop" in data["message"]
+
+    def test_discovery_run_minimal_request(self, client: TestClient) -> None:
+        """Test POST /api/discovery/run with minimal request."""
+        response = client.post(
+            "/api/discovery/run",
+            json={
+                "system": "Minimal system",
+                "roles": [{"name": "worker", "inputs": [], "outputs": []}],
+            },
+        )
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert "job_id" in data
+
+    def test_discovery_status_valid_job(self, client: TestClient) -> None:
+        """Test GET /api/discovery/status/{job_id} for an existing job."""
+        # First create a job
+        run_response = client.post(
+            "/api/discovery/run",
+            json={
+                "system": "Status test system",
+                "roles": [{"name": "tester", "inputs": [], "outputs": []}],
+            },
+        )
+        job_id = run_response.json()["job_id"]
+
+        # Get status
+        status_response = client.get(f"/api/discovery/status/{job_id}")
+        assert status_response.status_code == status.HTTP_200_OK
+        data = status_response.json()
+
+        assert data["job_id"] == job_id
+        assert data["status"] in ["pending", "running", "completed", "failed"]
+        assert "discovered_schemas" in data
+        assert "migrated_agent_count" in data
+
+    def test_discovery_status_not_found(self, client: TestClient) -> None:
+        """Test GET /api/discovery/status/{job_id} for non-existent job."""
+        response = client.get("/api/discovery/status/nonexistent-job-id")
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        assert "not found" in response.json()["detail"].lower()
+
+    def test_discovery_run_empty_roles(self, client: TestClient) -> None:
+        """Test POST /api/discovery/run with empty roles list."""
+        response = client.post(
+            "/api/discovery/run",
+            json={
+                "system": "Empty roles system",
+                "roles": [],
+            },
+        )
+        # Should accept the request (discovery may return empty results)
+        assert response.status_code == status.HTTP_200_OK
+
+
+class TestSchemasEndpoint:
+    """Tests for the updated /api/schemas endpoint."""
+
+    def test_get_schemas_empty_initially(self, client: TestClient) -> None:
+        """Test GET /api/schemas returns empty list initially."""
+        # Reset to ensure clean state
+        client.post("/api/world/reset")
+        response = client.get("/api/schemas")
+        assert response.status_code == status.HTTP_200_OK
+        schemas = response.json()
+        assert isinstance(schemas, list)
+        # Sandwich shop doesn't define schemas explicitly, so empty initially
+
+    def test_get_schemas_structure(self, client: TestClient) -> None:
+        """Test that schemas endpoint returns expected structure."""
+        response = client.get("/api/schemas")
+        assert response.status_code == status.HTTP_200_OK
+        schemas = response.json()
+        assert isinstance(schemas, list)
+        # Each schema should have role and traits
+        for schema in schemas:
+            assert "role" in schema
+            assert "traits" in schema
+            assert isinstance(schema["traits"], list)
