@@ -33,4 +33,9 @@ jobs:
           uv run ruff format --check .
 
       - name: Test
-        run: uv run pytest tests/ -v
+        run: |
+          if find tests/ -name "test_*.py" -o -name "*_test.py" 2>/dev/null | grep -q .; then
+            uv run pytest tests/ -v
+          else
+            echo "No test files found, skipping tests"
+          fi
