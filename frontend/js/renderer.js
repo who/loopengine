@@ -459,6 +459,15 @@
 
         // Render overlay
         renderOverlay(ctx, frame, canvasWidth, canvasHeight, connected);
+
+        // Render control bar (on top of everything)
+        if (typeof LoopEngineControls !== 'undefined') {
+            // Update tick counter from frame data
+            if (frame && frame.tick !== undefined) {
+                LoopEngineControls.updateTick(frame.tick);
+            }
+            LoopEngineControls.renderControlBar(ctx, canvasWidth, canvasHeight);
+        }
     }
 
     // =========================================================================

@@ -104,6 +104,17 @@
     // =========================================================================
 
     /**
+     * Check if point is in the control bar area.
+     * @param {number} y - Y coordinate
+     * @returns {boolean} True if in control bar
+     */
+    function isInControlBar(y) {
+        if (typeof LoopEngineControls === 'undefined') return false;
+        const canvasHeight = canvas._logicalHeight || canvas.height;
+        return LoopEngineControls.isPointInControlBar(y, canvasHeight);
+    }
+
+    /**
      * Handle mouse move events.
      * @param {MouseEvent} event - Mouse event
      */
@@ -111,6 +122,12 @@
         const rect = canvas.getBoundingClientRect();
         mouseX = event.clientX - rect.left;
         mouseY = event.clientY - rect.top;
+
+        // Ignore hover if in control bar (controls module handles its own events)
+        if (isInControlBar(mouseY) && !isDragging) {
+            hoveredAgent = null;
+            return;
+        }
 
         // Handle dragging for pan
         if (isDragging) {
@@ -165,6 +182,11 @@
         const clickX = event.clientX - rect.left;
         const clickY = event.clientY - rect.top;
 
+        // Ignore clicks in control bar (controls module handles its own events)
+        if (isInControlBar(clickY)) {
+            return;
+        }
+
         // Perform hit test against agents
         const clickedAgent = hitTestAgents(clickX, clickY);
 
@@ -186,11 +208,16 @@
      * @param {WheelEvent} event - Wheel event
      */
     function handleWheel(event) {
-        event.preventDefault();
-
         const rect = canvas.getBoundingClientRect();
         const mouseX = event.clientX - rect.left;
         const mouseY = event.clientY - rect.top;
+
+        // Ignore wheel events in control bar
+        if (isInControlBar(mouseY)) {
+            return;
+        }
+
+        event.preventDefault();
 
         // Calculate zoom factor
         const delta = -event.deltaY * ZOOM_SENSITIVITY;
@@ -234,6 +261,11 @@
         const rect = canvas.getBoundingClientRect();
         const clickX = event.clientX - rect.left;
         const clickY = event.clientY - rect.top;
+
+        // Ignore mouse down in control bar (controls module handles its own events)
+        if (isInControlBar(clickY)) {
+            return;
+        }
 
         // Check if clicking on an agent
         const hitAgent = hitTestAgents(clickX, clickY);

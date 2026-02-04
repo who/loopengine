@@ -52,6 +52,11 @@
             LoopEngineInteraction.init(canvas);
         }
 
+        // Initialize controls module
+        if (typeof LoopEngineControls !== 'undefined') {
+            LoopEngineControls.init(canvas, sendControlCommand);
+        }
+
         // Connect to WebSockets
         connectFramesSocket();
         connectControlSocket();
