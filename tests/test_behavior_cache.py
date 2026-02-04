@@ -3,6 +3,7 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -433,6 +434,248 @@ class TestBehaviorCacheUtilities:
 
         cache.set("key2", behavior_response)
         assert len(cache) == 2
+
+
+class TestCacheInvalidation:
+    """Tests for cache invalidation methods."""
+
+    def test_clear_all_removes_all_entries(
+        self, cache: BehaviorCache, behavior_response: BehaviorResponse
+    ) -> None:
+        """Test clear_all removes all entries from the cache."""
+        for i in range(3):
+            cache.set(f"domain1:agent1:key{i}", behavior_response)
+        cache.set("domain2:agent2:key1", behavior_response)
+
+        count = cache.clear_all()
+
+        assert count == 4
+        assert cache.size == 0
+
+    def test_clear_all_resets_stats(
+        self, cache: BehaviorCache, behavior_response: BehaviorResponse
+    ) -> None:
+        """Test clear_all resets all statistics counters."""
+        cache.set("key1", behavior_response)
+        cache.get("key1")  # hit
+        cache.get("nonexistent")  # miss
+
+        cache.clear_all()
+        stats = cache.get_stats()
+
+        assert stats["hits"] == 0
+        assert stats["misses"] == 0
+        assert stats["evictions"] == 0
+        assert stats["expirations"] == 0
+
+    def test_clear_domain_removes_domain_entries(
+        self, cache: BehaviorCache, behavior_response: BehaviorResponse
+    ) -> None:
+        """Test clear_domain only removes that domain's cache entries."""
+        # Add entries for multiple domains
+        cache.set("domain1:agent1:hash1", behavior_response)
+        cache.set("domain1:agent2:hash2", behavior_response)
+        cache.set("domain2:agent1:hash3", behavior_response)
+        cache.set("domain3:agent1:hash4", behavior_response)
+
+        count = cache.clear_domain("domain1")
+
+        assert count == 2
+        assert cache.size == 2
+        assert cache.get("domain1:agent1:hash1") is None
+        assert cache.get("domain1:agent2:hash2") is None
+        assert cache.get("domain2:agent1:hash3") is not None
+        assert cache.get("domain3:agent1:hash4") is not None
+
+    def test_clear_domain_with_no_matching_entries(
+        self, cache: BehaviorCache, behavior_response: BehaviorResponse
+    ) -> None:
+        """Test clear_domain returns 0 when no entries match."""
+        cache.set("domain1:agent1:hash1", behavior_response)
+
+        count = cache.clear_domain("nonexistent_domain")
+
+        assert count == 0
+        assert cache.size == 1
+
+    def test_clear_domain_empty_cache(self, cache: BehaviorCache) -> None:
+        """Test clear_domain on empty cache returns 0."""
+        count = cache.clear_domain("any_domain")
+        assert count == 0
+
+    def test_clear_agent_type_removes_matching_entries(
+        self, cache: BehaviorCache, behavior_response: BehaviorResponse
+    ) -> None:
+        """Test clear_agent_type removes entries for specific domain and agent type."""
+        # Add entries for different combinations
+        cache.set("domain1:employee:hash1", behavior_response)
+        cache.set("domain1:employee:hash2", behavior_response)
+        cache.set("domain1:manager:hash3", behavior_response)
+        cache.set("domain2:employee:hash4", behavior_response)
+
+        count = cache.clear_agent_type("domain1", "employee")
+
+        assert count == 2
+        assert cache.size == 2
+        assert cache.get("domain1:employee:hash1") is None
+        assert cache.get("domain1:employee:hash2") is None
+        assert cache.get("domain1:manager:hash3") is not None
+        assert cache.get("domain2:employee:hash4") is not None
+
+    def test_clear_agent_type_with_no_matching_entries(
+        self, cache: BehaviorCache, behavior_response: BehaviorResponse
+    ) -> None:
+        """Test clear_agent_type returns 0 when no entries match."""
+        cache.set("domain1:agent1:hash1", behavior_response)
+
+        count = cache.clear_agent_type("domain1", "nonexistent_agent")
+
+        assert count == 0
+        assert cache.size == 1
+
+    def test_clear_agent_type_empty_cache(self, cache: BehaviorCache) -> None:
+        """Test clear_agent_type on empty cache returns 0."""
+        count = cache.clear_agent_type("domain", "agent")
+        assert count == 0
+
+    def test_ttl_expiry_triggers_automatic_removal(
+        self, behavior_response: BehaviorResponse
+    ) -> None:
+        """Test TTL expiry triggers automatic removal during get()."""
+        cache = BehaviorCache(max_size=10, default_ttl=0.05)
+        cache.set("domain:agent:key", behavior_response)
+
+        # Entry should exist immediately
+        assert cache.get("domain:agent:key") is not None
+
+        # Wait for expiry
+        time.sleep(0.1)
+
+        # Entry should be automatically removed on access
+        assert cache.get("domain:agent:key") is None
+        assert cache.get_stats()["expirations"] == 1
+
+    def test_clear_all_preserves_cache_configuration(
+        self, cache: BehaviorCache, behavior_response: BehaviorResponse
+    ) -> None:
+        """Test clear_all preserves max_size and default_ttl settings."""
+        original_max_size = cache.max_size
+        original_ttl = cache.default_ttl
+
+        cache.set("key1", behavior_response)
+        cache.clear_all()
+
+        assert cache.max_size == original_max_size
+        assert cache.default_ttl == original_ttl
+
+
+class TestCacheAndPinStoreIntegration:
+    """Integration tests for cache invalidation not affecting pinned behaviors."""
+
+    def test_pinned_behaviors_survive_cache_clear_all(
+        self, behavior_response: BehaviorResponse, tmp_path: Path
+    ) -> None:
+        """Test pinned behaviors are not affected by cache.clear_all()."""
+        from loopengine.behaviors.behavior_pin_store import BehaviorPinStore
+
+        cache = BehaviorCache(max_size=10, default_ttl=60.0)
+        pin_store = BehaviorPinStore(storage_dir=tmp_path / "pins")
+
+        # Add entry to cache
+        cache.set("domain:agent:hash", behavior_response)
+
+        # Pin a behavior
+        pin_id = pin_store.pin(
+            domain_id="domain",
+            agent_type="agent",
+            context={"task": "wait"},
+            behavior=behavior_response,
+            reason="Test pin",
+        )
+
+        # Clear the cache
+        cache.clear_all()
+
+        # Cache should be empty
+        assert cache.size == 0
+        assert cache.get("domain:agent:hash") is None
+
+        # Pinned behavior should still exist
+        assert pin_store.get_by_id(pin_id) is not None
+        pinned = pin_store.get_behavior("domain", "agent", {"task": "wait"})
+        assert pinned is not None
+        assert pinned.action == behavior_response.action
+
+    def test_pinned_behaviors_survive_cache_clear_domain(
+        self, behavior_response: BehaviorResponse, tmp_path: Path
+    ) -> None:
+        """Test pinned behaviors are not affected by cache.clear_domain()."""
+        from loopengine.behaviors.behavior_pin_store import BehaviorPinStore
+
+        cache = BehaviorCache(max_size=10, default_ttl=60.0)
+        pin_store = BehaviorPinStore(storage_dir=tmp_path / "pins")
+
+        # Add entry to cache
+        cache.set("domain:agent:hash", behavior_response)
+
+        # Pin a behavior
+        pin_id = pin_store.pin(
+            domain_id="domain",
+            agent_type="agent",
+            context={"task": "wait"},
+            behavior=behavior_response,
+        )
+
+        # Clear domain from cache
+        cache.clear_domain("domain")
+
+        # Cache entry should be gone
+        assert cache.get("domain:agent:hash") is None
+
+        # Pinned behavior should still exist
+        assert pin_store.get_by_id(pin_id) is not None
+
+    def test_unpin_removes_pinned_behavior(
+        self, behavior_response: BehaviorResponse, tmp_path: Path
+    ) -> None:
+        """Test unpin removes the pinned behavior from pin store."""
+        from loopengine.behaviors.behavior_pin_store import BehaviorPinStore
+
+        pin_store = BehaviorPinStore(storage_dir=tmp_path / "pins")
+
+        # Pin a behavior
+        pin_id = pin_store.pin(
+            domain_id="domain",
+            agent_type="agent",
+            context={"task": "wait"},
+            behavior=behavior_response,
+        )
+        assert pin_store.get_by_id(pin_id) is not None
+
+        # Unpin
+        result = pin_store.unpin(pin_id)
+
+        assert result is True
+        assert pin_store.get_by_id(pin_id) is None
+
+    def test_list_pinned_returns_all_pins_for_domain(
+        self, behavior_response: BehaviorResponse, tmp_path: Path
+    ) -> None:
+        """Test list_pins returns all pins for a specific domain."""
+        from loopengine.behaviors.behavior_pin_store import BehaviorPinStore
+
+        pin_store = BehaviorPinStore(storage_dir=tmp_path / "pins")
+
+        # Pin behaviors for different domains
+        pin_store.pin("domain1", "agent1", {"task": "a"}, behavior_response)
+        pin_store.pin("domain1", "agent2", {"task": "b"}, behavior_response)
+        pin_store.pin("domain2", "agent1", {"task": "c"}, behavior_response)
+
+        # List pins for domain1
+        domain1_pins = pin_store.list_pins("domain1")
+
+        assert len(domain1_pins) == 2
+        assert all(p.domain_id == "domain1" for p in domain1_pins)
 
 
 class TestCacheEntry:

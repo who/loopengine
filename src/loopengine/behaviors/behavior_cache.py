@@ -206,6 +206,102 @@ class BehaviorCache:
             logger.info("Cleared %d entries from cache", count)
             return count
 
+    def clear_all(self) -> int:
+        """Clear all entries from the cache and reset statistics.
+
+        This is a more thorough clear than clear() that also resets
+        statistics counters. Use this for complete cache invalidation.
+
+        Thread-safe.
+
+        Note: This does not affect pinned behaviors, which are stored
+        separately in BehaviorPinStore.
+
+        Returns:
+            Number of entries cleared.
+        """
+        with self._lock:
+            count = len(self._cache)
+            self._cache.clear()
+            self._hits = 0
+            self._misses = 0
+            self._evictions = 0
+            self._expirations = 0
+            logger.info("Cleared all %d entries from cache and reset stats", count)
+            return count
+
+    def clear_domain(self, domain_id: str) -> int:
+        """Clear all cache entries for a specific domain.
+
+        Removes entries where the cache key starts with "{domain_id}:".
+        Cache keys follow the format: "{domain_id}:{agent_type}:{hash}".
+
+        Thread-safe.
+
+        Note: This does not affect pinned behaviors, which are stored
+        separately in BehaviorPinStore.
+
+        Args:
+            domain_id: The domain identifier whose entries should be cleared.
+
+        Returns:
+            Number of entries cleared.
+        """
+        prefix = f"{domain_id}:"
+        keys_to_remove: list[str] = []
+
+        with self._lock:
+            for key in self._cache:
+                if key.startswith(prefix):
+                    keys_to_remove.append(key)
+
+            for key in keys_to_remove:
+                del self._cache[key]
+
+            if keys_to_remove:
+                logger.info("Cleared %d entries for domain %s", len(keys_to_remove), domain_id)
+
+            return len(keys_to_remove)
+
+    def clear_agent_type(self, domain_id: str, agent_type: str) -> int:
+        """Clear all cache entries for a specific domain and agent type.
+
+        Removes entries where the cache key starts with "{domain_id}:{agent_type}:".
+        Cache keys follow the format: "{domain_id}:{agent_type}:{hash}".
+
+        Thread-safe.
+
+        Note: This does not affect pinned behaviors, which are stored
+        separately in BehaviorPinStore.
+
+        Args:
+            domain_id: The domain identifier.
+            agent_type: The agent type whose entries should be cleared.
+
+        Returns:
+            Number of entries cleared.
+        """
+        prefix = f"{domain_id}:{agent_type}:"
+        keys_to_remove: list[str] = []
+
+        with self._lock:
+            for key in self._cache:
+                if key.startswith(prefix):
+                    keys_to_remove.append(key)
+
+            for key in keys_to_remove:
+                del self._cache[key]
+
+            if keys_to_remove:
+                logger.info(
+                    "Cleared %d entries for domain=%s agent_type=%s",
+                    len(keys_to_remove),
+                    domain_id,
+                    agent_type,
+                )
+
+            return len(keys_to_remove)
+
     def cleanup_expired(self) -> int:
         """Remove all expired entries from the cache.
 
