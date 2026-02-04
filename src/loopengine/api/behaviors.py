@@ -21,7 +21,7 @@ from loopengine.behaviors import (
     DomainStoreError,
     StoredBehavior,
 )
-from loopengine.behaviors.prompt_builder import AgentContext, DomainContext
+from loopengine.behaviors.prompt_builder import AgentContext, ConstraintContext, DomainContext
 
 logger = logging.getLogger(__name__)
 
@@ -254,9 +254,15 @@ async def generate_behavior(
         ) from e
 
     # Build contexts for the engine
+    # Convert domain constraints to context constraints
+    constraints = [
+        ConstraintContext(text=c.text, constraint_type=c.constraint_type)
+        for c in stored.schema_.constraints
+    ]
     domain_context = DomainContext(
         domain_type=stored.schema_.domain_type,
         domain_description=stored.schema_.description,
+        constraints=constraints,
     )
     agent_context = AgentContext(
         agent_type=agent_name,

@@ -61,11 +61,29 @@ class InteractionSchema(BaseModel):
     description: str = Field(default="", description="Description of the interaction")
 
 
+class ConstraintSchema(BaseModel):
+    """Schema for a behavioral constraint in a domain.
+
+    Constraints define rules that apply to agent behaviors, such as
+    "always greet customers first" or "never refuse service".
+
+    Attributes:
+        text: The constraint text in natural language.
+        constraint_type: Whether this is a positive ('always') or negative ('never') constraint.
+    """
+
+    text: str = Field(description="The constraint text in natural language")
+    constraint_type: str = Field(
+        default="positive",
+        description="Type of constraint: 'positive' (always do X) or 'negative' (never do Y)",
+    )
+
+
 class DomainSchema(BaseModel):
     """Structured schema extracted from a domain description.
 
     Represents the complete structure of a domain including agent types,
-    resources, and interactions.
+    resources, interactions, and behavioral constraints.
 
     Attributes:
         domain_type: The type/name of the domain (e.g., 'sandwich shop').
@@ -73,6 +91,7 @@ class DomainSchema(BaseModel):
         agent_types: List of agent types in the domain.
         resources: List of resources in the domain.
         interactions: List of interactions between agents/resources.
+        constraints: List of behavioral constraints that apply to all agents.
     """
 
     domain_type: str = Field(description="Type/name of the domain")
@@ -85,6 +104,10 @@ class DomainSchema(BaseModel):
     )
     interactions: list[InteractionSchema] = Field(
         default_factory=list, description="Interactions in the domain"
+    )
+    constraints: list[ConstraintSchema] = Field(
+        default_factory=list,
+        description="Behavioral constraints that apply to all agents in the domain",
     )
 
     @field_validator("domain_type")
@@ -145,6 +168,12 @@ You MUST respond with valid JSON in this exact format:
             "participants": ["agent_type1", "agent_type2"],
             "description": "what happens in this interaction"
         }
+    ],
+    "constraints": [
+        {
+            "text": "natural language constraint description",
+            "constraint_type": "positive or negative"
+        }
     ]
 }
 
@@ -154,8 +183,13 @@ Guidelines:
 - List capabilities as verbs (e.g., "make_sandwich", "take_order", "wait")
 - Identify resources that agents create, consume, or exchange
 - Identify interactions between different agent types
+- Extract behavioral constraints from the description:
+  - Positive constraints: things agents should "always" do (e.g., "always greet customers")
+  - Negative constraints: things agents should "never" do (e.g., "never refuse service")
+  - Look for words like "always", "never", "must", "must not", "should", "should not"
 - If the description is vague, make reasonable inferences
-- Always include at least one agent type"""
+- Always include at least one agent type
+- Constraints are optional - only include if mentioned or strongly implied"""
 
     PROMPT_TEMPLATE = """Analyze the following domain description and extract a structured schema.
 

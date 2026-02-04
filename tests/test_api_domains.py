@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from loopengine.api.domains import (
+    AddConstraintRequest,
     CreateDomainRequest,
     CreateDomainResponse,
     GetDomainResponse,
@@ -17,6 +18,7 @@ from loopengine.api.domains import (
     router,
 )
 from loopengine.behaviors import (
+    ConstraintSchema,
     DomainParser,
     DomainParserError,
     DomainSchema,
@@ -714,3 +716,431 @@ class TestGetDomainResponse:
 
         assert response.domain_id == "stored_test"
         assert response.metadata.version == 2
+
+
+class TestAddConstraintRequest:
+    """Tests for the AddConstraintRequest model."""
+
+    def test_valid_positive_constraint(self) -> None:
+        """Test creating a valid positive constraint request."""
+        request = AddConstraintRequest(
+            text="greet customers warmly",
+            constraint_type="positive",
+        )
+        assert request.text == "greet customers warmly"
+        assert request.constraint_type == "positive"
+
+    def test_valid_negative_constraint(self) -> None:
+        """Test creating a valid negative constraint request."""
+        request = AddConstraintRequest(
+            text="refuse service",
+            constraint_type="negative",
+        )
+        assert request.constraint_type == "negative"
+
+    def test_default_constraint_type_is_positive(self) -> None:
+        """Test that default constraint type is positive."""
+        request = AddConstraintRequest(text="be polite")
+        assert request.constraint_type == "positive"
+
+    def test_text_is_stripped(self) -> None:
+        """Test that text is stripped of whitespace."""
+        request = AddConstraintRequest(text="  greet customers  ")
+        assert request.text == "greet customers"
+
+    def test_empty_text_raises_error(self) -> None:
+        """Test that empty text raises validation error."""
+        with pytest.raises(ValueError):
+            AddConstraintRequest(text="")
+
+    def test_whitespace_text_raises_error(self) -> None:
+        """Test that whitespace-only text raises validation error."""
+        with pytest.raises(ValueError):
+            AddConstraintRequest(text="   ")
+
+    def test_invalid_constraint_type_raises_error(self) -> None:
+        """Test that invalid constraint_type raises validation error."""
+        with pytest.raises(ValueError) as exc_info:
+            AddConstraintRequest(text="test", constraint_type="invalid")
+        error_msg = str(exc_info.value).lower()
+        assert "positive" in error_msg or "negative" in error_msg
+
+    def test_constraint_type_is_normalized(self) -> None:
+        """Test that constraint_type is normalized to lowercase."""
+        request = AddConstraintRequest(text="test", constraint_type="POSITIVE")
+        assert request.constraint_type == "positive"
+
+
+class TestAddConstraintEndpoint:
+    """Tests for the POST /api/v1/domains/{domain_id}/constraints endpoint."""
+
+    def test_add_constraint_success(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+        sample_schema: DomainSchema,
+    ) -> None:
+        """Test successful constraint addition."""
+        store = DomainStore(storage_dir=temp_storage_dir)
+        store.save("test_shop", sample_schema)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.post(
+                "/api/v1/domains/test_shop/constraints",
+                json={"text": "always greet customers", "constraint_type": "positive"},
+            )
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["domain_id"] == "test_shop"
+        assert len(data["constraints"]) == 1
+        assert data["constraints"][0]["text"] == "always greet customers"
+        assert data["constraints"][0]["constraint_type"] == "positive"
+        assert data["version"] == 2  # Version incremented
+
+    def test_add_multiple_constraints(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+        sample_schema: DomainSchema,
+    ) -> None:
+        """Test adding multiple constraints."""
+        store = DomainStore(storage_dir=temp_storage_dir)
+        store.save("test_shop", sample_schema)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            # Add first constraint
+            response1 = client.post(
+                "/api/v1/domains/test_shop/constraints",
+                json={"text": "greet customers", "constraint_type": "positive"},
+            )
+            assert response1.status_code == status.HTTP_200_OK
+            assert len(response1.json()["constraints"]) == 1
+
+            # Add second constraint
+            response2 = client.post(
+                "/api/v1/domains/test_shop/constraints",
+                json={"text": "refuse service", "constraint_type": "negative"},
+            )
+            assert response2.status_code == status.HTTP_200_OK
+            assert len(response2.json()["constraints"]) == 2
+
+    def test_add_constraint_domain_not_found(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+    ) -> None:
+        """Test adding constraint to non-existent domain returns 404."""
+        store = DomainStore(storage_dir=temp_storage_dir)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.post(
+                "/api/v1/domains/nonexistent/constraints",
+                json={"text": "test", "constraint_type": "positive"},
+            )
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_add_constraint_default_positive(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+        sample_schema: DomainSchema,
+    ) -> None:
+        """Test that constraint_type defaults to positive."""
+        store = DomainStore(storage_dir=temp_storage_dir)
+        store.save("test_shop", sample_schema)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.post(
+                "/api/v1/domains/test_shop/constraints",
+                json={"text": "be helpful"},
+            )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["constraints"][0]["constraint_type"] == "positive"
+
+
+class TestUpdateConstraintsEndpoint:
+    """Tests for the PUT /api/v1/domains/{domain_id}/constraints endpoint."""
+
+    def test_update_constraints_success(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+        sample_schema: DomainSchema,
+    ) -> None:
+        """Test successful constraints update."""
+        store = DomainStore(storage_dir=temp_storage_dir)
+        store.save("test_shop", sample_schema)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.put(
+                "/api/v1/domains/test_shop/constraints",
+                json={
+                    "constraints": [
+                        {"text": "greet customers", "constraint_type": "positive"},
+                        {"text": "refuse service", "constraint_type": "negative"},
+                    ]
+                },
+            )
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert len(data["constraints"]) == 2
+        assert data["constraints"][0]["text"] == "greet customers"
+        assert data["constraints"][1]["text"] == "refuse service"
+
+    def test_update_constraints_replaces_existing(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+        sample_schema: DomainSchema,
+    ) -> None:
+        """Test that update replaces existing constraints."""
+        # Create schema with existing constraint
+        schema_with_constraint = DomainSchema(
+            domain_type=sample_schema.domain_type,
+            description=sample_schema.description,
+            agent_types=sample_schema.agent_types,
+            constraints=[ConstraintSchema(text="old constraint", constraint_type="positive")],
+        )
+        store = DomainStore(storage_dir=temp_storage_dir)
+        store.save("test_shop", schema_with_constraint)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.put(
+                "/api/v1/domains/test_shop/constraints",
+                json={
+                    "constraints": [
+                        {"text": "new constraint", "constraint_type": "negative"},
+                    ]
+                },
+            )
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert len(data["constraints"]) == 1
+        assert data["constraints"][0]["text"] == "new constraint"
+        assert data["constraints"][0]["constraint_type"] == "negative"
+
+    def test_update_constraints_clear_all(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+        sample_schema: DomainSchema,
+    ) -> None:
+        """Test clearing all constraints with empty list."""
+        schema_with_constraint = DomainSchema(
+            domain_type=sample_schema.domain_type,
+            description=sample_schema.description,
+            agent_types=sample_schema.agent_types,
+            constraints=[ConstraintSchema(text="constraint", constraint_type="positive")],
+        )
+        store = DomainStore(storage_dir=temp_storage_dir)
+        store.save("test_shop", schema_with_constraint)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.put(
+                "/api/v1/domains/test_shop/constraints",
+                json={"constraints": []},
+            )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert len(response.json()["constraints"]) == 0
+
+    def test_update_constraints_domain_not_found(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+    ) -> None:
+        """Test updating constraints on non-existent domain returns 404."""
+        store = DomainStore(storage_dir=temp_storage_dir)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.put(
+                "/api/v1/domains/nonexistent/constraints",
+                json={"constraints": []},
+            )
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+
+class TestGetConstraintsEndpoint:
+    """Tests for the GET /api/v1/domains/{domain_id}/constraints endpoint."""
+
+    def test_get_constraints_success(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+        sample_schema: DomainSchema,
+    ) -> None:
+        """Test successful constraints retrieval."""
+        schema_with_constraints = DomainSchema(
+            domain_type=sample_schema.domain_type,
+            description=sample_schema.description,
+            agent_types=sample_schema.agent_types,
+            constraints=[
+                ConstraintSchema(text="greet customers", constraint_type="positive"),
+                ConstraintSchema(text="refuse service", constraint_type="negative"),
+            ],
+        )
+        store = DomainStore(storage_dir=temp_storage_dir)
+        store.save("test_shop", schema_with_constraints)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.get("/api/v1/domains/test_shop/constraints")
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["domain_id"] == "test_shop"
+        assert len(data["constraints"]) == 2
+        assert data["constraints"][0]["text"] == "greet customers"
+
+    def test_get_constraints_empty(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+        sample_schema: DomainSchema,
+    ) -> None:
+        """Test getting constraints when none exist."""
+        store = DomainStore(storage_dir=temp_storage_dir)
+        store.save("test_shop", sample_schema)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.get("/api/v1/domains/test_shop/constraints")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert len(response.json()["constraints"]) == 0
+
+    def test_get_constraints_domain_not_found(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+    ) -> None:
+        """Test getting constraints from non-existent domain returns 404."""
+        store = DomainStore(storage_dir=temp_storage_dir)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.get("/api/v1/domains/nonexistent/constraints")
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+
+class TestDeleteConstraintEndpoint:
+    """Tests for DELETE /api/v1/domains/{domain_id}/constraints/{constraint_index} endpoint."""
+
+    def test_delete_constraint_success(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+        sample_schema: DomainSchema,
+    ) -> None:
+        """Test successful constraint deletion."""
+        schema_with_constraints = DomainSchema(
+            domain_type=sample_schema.domain_type,
+            description=sample_schema.description,
+            agent_types=sample_schema.agent_types,
+            constraints=[
+                ConstraintSchema(text="first constraint", constraint_type="positive"),
+                ConstraintSchema(text="second constraint", constraint_type="negative"),
+            ],
+        )
+        store = DomainStore(storage_dir=temp_storage_dir)
+        store.save("test_shop", schema_with_constraints)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.delete("/api/v1/domains/test_shop/constraints/0")
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert len(data["constraints"]) == 1
+        assert data["constraints"][0]["text"] == "second constraint"
+
+    def test_delete_constraint_invalid_index(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+        sample_schema: DomainSchema,
+    ) -> None:
+        """Test deleting constraint with invalid index returns 404."""
+        schema_with_constraints = DomainSchema(
+            domain_type=sample_schema.domain_type,
+            description=sample_schema.description,
+            agent_types=sample_schema.agent_types,
+            constraints=[
+                ConstraintSchema(text="constraint", constraint_type="positive"),
+            ],
+        )
+        store = DomainStore(storage_dir=temp_storage_dir)
+        store.save("test_shop", schema_with_constraints)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.delete("/api/v1/domains/test_shop/constraints/5")
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        assert "index" in response.json()["detail"].lower()
+
+    def test_delete_constraint_negative_index(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+        sample_schema: DomainSchema,
+    ) -> None:
+        """Test deleting constraint with negative index returns 404."""
+        schema_with_constraints = DomainSchema(
+            domain_type=sample_schema.domain_type,
+            description=sample_schema.description,
+            agent_types=sample_schema.agent_types,
+            constraints=[
+                ConstraintSchema(text="constraint", constraint_type="positive"),
+            ],
+        )
+        store = DomainStore(storage_dir=temp_storage_dir)
+        store.save("test_shop", schema_with_constraints)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.delete("/api/v1/domains/test_shop/constraints/-1")
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_delete_constraint_domain_not_found(
+        self,
+        client: TestClient,
+        temp_storage_dir: Path,
+    ) -> None:
+        """Test deleting constraint from non-existent domain returns 404."""
+        store = DomainStore(storage_dir=temp_storage_dir)
+
+        with patch("loopengine.api.domains._get_store", return_value=store):
+            response = client.delete("/api/v1/domains/nonexistent/constraints/0")
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+
+class TestConstraintEndpointsRouterIntegration:
+    """Integration tests for constraint endpoints registration."""
+
+    def test_add_constraint_endpoint_exists(self) -> None:
+        """Test POST constraints endpoint is registered."""
+        routes = [r for r in router.routes if "constraints" in r.path and "{domain_id}" in r.path]
+        post_routes = [r for r in routes if "POST" in r.methods and r.path.endswith("/constraints")]
+        assert len(post_routes) == 1
+
+    def test_update_constraints_endpoint_exists(self) -> None:
+        """Test PUT constraints endpoint is registered."""
+        routes = [r for r in router.routes if "constraints" in r.path and "{domain_id}" in r.path]
+        put_routes = [r for r in routes if "PUT" in r.methods]
+        assert len(put_routes) == 1
+
+    def test_get_constraints_endpoint_exists(self) -> None:
+        """Test GET constraints endpoint is registered."""
+        routes = [r for r in router.routes if "constraints" in r.path and "{domain_id}" in r.path]
+        get_routes = [r for r in routes if "GET" in r.methods and r.path.endswith("/constraints")]
+        assert len(get_routes) == 1
+
+    def test_delete_constraint_endpoint_exists(self) -> None:
+        """Test DELETE constraint endpoint is registered."""
+        routes = [r for r in router.routes if "constraint_index" in r.path]
+        delete_routes = [r for r in routes if "DELETE" in r.methods]
+        assert len(delete_routes) == 1

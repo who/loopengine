@@ -10,16 +10,36 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class ConstraintContext(BaseModel):
+    """A behavioral constraint for prompt building.
+
+    Attributes:
+        text: The constraint text in natural language.
+        constraint_type: Whether this is a positive ('always') or negative ('never') constraint.
+    """
+
+    text: str = Field(description="The constraint text in natural language")
+    constraint_type: str = Field(
+        default="positive",
+        description="Type of constraint: 'positive' (always do X) or 'negative' (never do Y)",
+    )
+
+
 class DomainContext(BaseModel):
     """Domain configuration for prompt building.
 
     Attributes:
         domain_type: The type of business or system (e.g., 'flower shop').
         domain_description: Detailed description of the domain.
+        constraints: Behavioral constraints that apply to all agents.
     """
 
     domain_type: str = Field(description="Type of business or system being simulated")
     domain_description: str = Field(default="", description="Detailed domain description")
+    constraints: list[ConstraintContext] = Field(
+        default_factory=list,
+        description="Behavioral constraints that apply to all agents",
+    )
 
 
 class AgentContext(BaseModel):
@@ -105,6 +125,15 @@ Respond with a JSON object containing:
 
         if agent.agent_role:
             parts.append(f"Agent Role: {agent.agent_role}")
+
+        # Add behavioral constraints if present
+        if domain.constraints:
+            constraint_lines = []
+            for c in domain.constraints:
+                prefix = "ALWAYS:" if c.constraint_type == "positive" else "NEVER:"
+                constraint_lines.append(f"- {prefix} {c.text}")
+            constraints_text = "\n".join(constraint_lines)
+            parts.append(f"Behavioral Constraints (MUST be followed):\n{constraints_text}")
 
         if context:
             json_context = json.dumps(context, indent=2, default=str)

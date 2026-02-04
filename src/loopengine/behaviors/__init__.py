@@ -20,6 +20,7 @@ from loopengine.behaviors.config import (
 )
 from loopengine.behaviors.domain_parser import (
     AgentTypeSchema,
+    ConstraintSchema,
     DomainParser,
     DomainParserError,
     DomainSchema,
@@ -56,6 +57,7 @@ from loopengine.behaviors.llm_client import (
 )
 from loopengine.behaviors.prompt_builder import (
     AgentContext,
+    ConstraintContext,
     DomainContext,
     PromptBuilder,
 )
@@ -90,6 +92,8 @@ __all__ = [
     "AlertSeverity",
     "BehaviorHistoryStore",
     "BehaviorResponse",
+    "ConstraintContext",
+    "ConstraintSchema",
     "DomainContext",
     "DomainMetadata",
     "DomainParser",

@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
 from loopengine.behaviors import (
+    ConstraintSchema,
     DomainMetadata,
     DomainParser,
     DomainParserError,
@@ -241,4 +242,329 @@ async def get_domain(domain_id: str) -> GetDomainResponse:
         domain_id=domain_id,
         schema=stored.schema_,
         metadata=stored.metadata,
+    )
+
+
+class AddConstraintRequest(BaseModel):
+    """Request body for adding a constraint to a domain."""
+
+    text: str = Field(
+        description="The constraint text in natural language",
+        min_length=1,
+    )
+    constraint_type: str = Field(
+        default="positive",
+        description="Type of constraint: 'positive' (always do X) or 'negative' (never do Y)",
+    )
+
+    @field_validator("text")
+    @classmethod
+    def text_not_empty(cls, v: str) -> str:
+        """Validate text is not just whitespace."""
+        if not v or not v.strip():
+            raise ValueError("Constraint text cannot be empty or whitespace only")
+        return v.strip()
+
+    @field_validator("constraint_type")
+    @classmethod
+    def validate_constraint_type(cls, v: str) -> str:
+        """Validate constraint_type is valid."""
+        v = v.lower().strip()
+        if v not in ("positive", "negative"):
+            raise ValueError("constraint_type must be 'positive' or 'negative'")
+        return v
+
+
+class UpdateConstraintsRequest(BaseModel):
+    """Request body for updating all constraints on a domain."""
+
+    constraints: list[AddConstraintRequest] = Field(
+        description="List of constraints to set on the domain"
+    )
+
+
+class ConstraintResponse(BaseModel):
+    """Response for constraint operations."""
+
+    domain_id: str = Field(description="Domain ID")
+    constraints: list[ConstraintSchema] = Field(description="Current constraints")
+    version: int = Field(description="Updated domain version")
+
+
+@router.post(
+    "/{domain_id}/constraints",
+    response_model=ConstraintResponse,
+    responses={
+        200: {"description": "Constraint added successfully"},
+        404: {"description": "Domain not found"},
+    },
+)
+async def add_constraint(
+    domain_id: str,
+    request: AddConstraintRequest,
+) -> ConstraintResponse:
+    """Add a behavioral constraint to an existing domain.
+
+    Constraints can be added without re-parsing the domain description.
+    This allows immediate effect on behavior generation.
+
+    Args:
+        domain_id: ID of the domain to add constraint to.
+        request: Constraint details.
+
+    Returns:
+        ConstraintResponse with updated constraints list.
+
+    Raises:
+        HTTPException: 404 if domain doesn't exist.
+    """
+    store = _get_store()
+
+    # Load existing domain
+    try:
+        stored = store.load(domain_id)
+    except DomainStoreError as e:
+        logger.warning("Domain not found for constraint add: %s", domain_id)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Domain '{domain_id}' not found",
+        ) from e
+
+    # Add the new constraint
+    new_constraint = ConstraintSchema(
+        text=request.text,
+        constraint_type=request.constraint_type,
+    )
+    updated_constraints = [*stored.schema_.constraints, new_constraint]
+
+    # Create updated schema
+    updated_schema = DomainSchema(
+        domain_type=stored.schema_.domain_type,
+        description=stored.schema_.description,
+        agent_types=stored.schema_.agent_types,
+        resources=stored.schema_.resources,
+        interactions=stored.schema_.interactions,
+        constraints=updated_constraints,
+    )
+
+    # Save updated domain
+    try:
+        updated = store.save(domain_id, updated_schema)
+    except DomainStoreError as e:
+        logger.error("Failed to save constraint: %s", str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save constraint: {e}",
+        ) from e
+
+    logger.info(
+        "Added constraint to domain %s (version %d): %s",
+        domain_id,
+        updated.metadata.version,
+        request.text[:50],
+    )
+
+    return ConstraintResponse(
+        domain_id=domain_id,
+        constraints=updated_schema.constraints,
+        version=updated.metadata.version,
+    )
+
+
+@router.put(
+    "/{domain_id}/constraints",
+    response_model=ConstraintResponse,
+    responses={
+        200: {"description": "Constraints updated successfully"},
+        404: {"description": "Domain not found"},
+    },
+)
+async def update_constraints(
+    domain_id: str,
+    request: UpdateConstraintsRequest,
+) -> ConstraintResponse:
+    """Replace all constraints on a domain.
+
+    This replaces the entire constraints list, allowing modification
+    or removal of constraints without re-parsing the domain.
+
+    Args:
+        domain_id: ID of the domain to update.
+        request: New constraints list.
+
+    Returns:
+        ConstraintResponse with updated constraints list.
+
+    Raises:
+        HTTPException: 404 if domain doesn't exist.
+    """
+    store = _get_store()
+
+    # Load existing domain
+    try:
+        stored = store.load(domain_id)
+    except DomainStoreError as e:
+        logger.warning("Domain not found for constraint update: %s", domain_id)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Domain '{domain_id}' not found",
+        ) from e
+
+    # Convert request constraints to schema constraints
+    updated_constraints = [
+        ConstraintSchema(text=c.text, constraint_type=c.constraint_type)
+        for c in request.constraints
+    ]
+
+    # Create updated schema
+    updated_schema = DomainSchema(
+        domain_type=stored.schema_.domain_type,
+        description=stored.schema_.description,
+        agent_types=stored.schema_.agent_types,
+        resources=stored.schema_.resources,
+        interactions=stored.schema_.interactions,
+        constraints=updated_constraints,
+    )
+
+    # Save updated domain
+    try:
+        updated = store.save(domain_id, updated_schema)
+    except DomainStoreError as e:
+        logger.error("Failed to update constraints: %s", str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update constraints: {e}",
+        ) from e
+
+    logger.info(
+        "Updated constraints on domain %s (version %d): %d constraints",
+        domain_id,
+        updated.metadata.version,
+        len(updated_constraints),
+    )
+
+    return ConstraintResponse(
+        domain_id=domain_id,
+        constraints=updated_schema.constraints,
+        version=updated.metadata.version,
+    )
+
+
+@router.get(
+    "/{domain_id}/constraints",
+    response_model=ConstraintResponse,
+    responses={
+        200: {"description": "Constraints retrieved successfully"},
+        404: {"description": "Domain not found"},
+    },
+)
+async def get_constraints(domain_id: str) -> ConstraintResponse:
+    """Get constraints for a domain.
+
+    Args:
+        domain_id: ID of the domain.
+
+    Returns:
+        ConstraintResponse with current constraints list.
+
+    Raises:
+        HTTPException: 404 if domain doesn't exist.
+    """
+    store = _get_store()
+
+    try:
+        stored = store.load(domain_id)
+    except DomainStoreError as e:
+        logger.warning("Domain not found for constraint get: %s", domain_id)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Domain '{domain_id}' not found",
+        ) from e
+
+    return ConstraintResponse(
+        domain_id=domain_id,
+        constraints=stored.schema_.constraints,
+        version=stored.metadata.version,
+    )
+
+
+@router.delete(
+    "/{domain_id}/constraints/{constraint_index}",
+    response_model=ConstraintResponse,
+    responses={
+        200: {"description": "Constraint deleted successfully"},
+        404: {"description": "Domain or constraint not found"},
+    },
+)
+async def delete_constraint(
+    domain_id: str,
+    constraint_index: int,
+) -> ConstraintResponse:
+    """Delete a specific constraint from a domain by index.
+
+    Args:
+        domain_id: ID of the domain.
+        constraint_index: Zero-based index of constraint to delete.
+
+    Returns:
+        ConstraintResponse with updated constraints list.
+
+    Raises:
+        HTTPException: 404 if domain or constraint doesn't exist.
+    """
+    store = _get_store()
+
+    # Load existing domain
+    try:
+        stored = store.load(domain_id)
+    except DomainStoreError as e:
+        logger.warning("Domain not found for constraint delete: %s", domain_id)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Domain '{domain_id}' not found",
+        ) from e
+
+    # Validate index
+    if constraint_index < 0 or constraint_index >= len(stored.schema_.constraints):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Constraint index {constraint_index} not found. "
+            f"Domain has {len(stored.schema_.constraints)} constraints.",
+        )
+
+    # Remove the constraint
+    updated_constraints = list(stored.schema_.constraints)
+    removed = updated_constraints.pop(constraint_index)
+
+    # Create updated schema
+    updated_schema = DomainSchema(
+        domain_type=stored.schema_.domain_type,
+        description=stored.schema_.description,
+        agent_types=stored.schema_.agent_types,
+        resources=stored.schema_.resources,
+        interactions=stored.schema_.interactions,
+        constraints=updated_constraints,
+    )
+
+    # Save updated domain
+    try:
+        updated = store.save(domain_id, updated_schema)
+    except DomainStoreError as e:
+        logger.error("Failed to delete constraint: %s", str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete constraint: {e}",
+        ) from e
+
+    logger.info(
+        "Deleted constraint from domain %s (version %d): %s",
+        domain_id,
+        updated.metadata.version,
+        removed.text[:50],
+    )
+
+    return ConstraintResponse(
+        domain_id=domain_id,
+        constraints=updated_schema.constraints,
+        version=updated.metadata.version,
     )
