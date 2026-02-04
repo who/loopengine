@@ -407,3 +407,36 @@ class BehaviorCache:
     def __len__(self) -> int:
         """Get the current number of entries. Thread-safe."""
         return self.size
+
+    def list_entries(
+        self,
+        domain_id: str | None = None,
+    ) -> list[tuple[str, CacheEntry]]:
+        """List all cache entries, optionally filtered by domain.
+
+        Thread-safe.
+
+        Args:
+            domain_id: Optional domain ID to filter by. If provided, only
+                entries whose key starts with "{domain_id}:" are returned.
+
+        Returns:
+            List of (key, CacheEntry) tuples for valid (non-expired) entries.
+        """
+        now = time.time()
+        prefix = f"{domain_id}:" if domain_id else None
+        result: list[tuple[str, CacheEntry]] = []
+
+        with self._lock:
+            for key, entry in self._cache.items():
+                # Skip expired entries
+                if now > entry.expires_at:
+                    continue
+
+                # Apply domain filter if specified
+                if prefix and not key.startswith(prefix):
+                    continue
+
+                result.append((key, entry))
+
+        return result

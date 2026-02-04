@@ -728,3 +728,169 @@ class TestContextPassthrough:
         agent = call_args.kwargs.get("agent")
         assert agent.agent_type == "cashier"
         assert "orders" in agent.agent_role.lower() or "payments" in agent.agent_role.lower()
+
+
+class TestGetCacheEndpoint:
+    """Tests for the GET /api/v1/behaviors/cache endpoint."""
+
+    def test_get_cache_empty(self, client: TestClient) -> None:
+        """Test getting empty cache returns empty list."""
+        from loopengine.behaviors import BehaviorCache
+
+        cache = BehaviorCache()
+
+        with patch("loopengine.api.behaviors._get_behavior_cache", return_value=cache):
+            response = client.get("/api/v1/behaviors/cache")
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["entries"] == []
+        assert data["total_entries"] == 0
+        assert "stats" in data
+        assert data["stats"]["hits"] == 0
+        assert data["stats"]["misses"] == 0
+
+    def test_get_cache_with_entries(self, client: TestClient) -> None:
+        """Test getting cache with entries returns all entries."""
+        from loopengine.behaviors import BehaviorCache
+
+        cache = BehaviorCache()
+        behavior1 = BehaviorResponse(
+            action="make_sandwich",
+            parameters={"type": "turkey"},
+            reasoning="Customer wants turkey",
+            metadata={},
+        )
+        behavior2 = BehaviorResponse(
+            action="wait",
+            parameters={},
+            reasoning="Queue empty",
+            metadata={},
+        )
+        cache.set("domain1:agent1:hash1", behavior1)
+        cache.set("domain2:agent2:hash2", behavior2)
+
+        with patch("loopengine.api.behaviors._get_behavior_cache", return_value=cache):
+            response = client.get("/api/v1/behaviors/cache")
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert len(data["entries"]) == 2
+        assert data["total_entries"] == 2
+
+        # Verify entry contents
+        keys = [e["key"] for e in data["entries"]]
+        assert "domain1:agent1:hash1" in keys
+        assert "domain2:agent2:hash2" in keys
+
+        # Find and verify the first behavior
+        entry1 = next(e for e in data["entries"] if e["key"] == "domain1:agent1:hash1")
+        assert entry1["action"] == "make_sandwich"
+        assert entry1["parameters"] == {"type": "turkey"}
+        assert entry1["reasoning"] == "Customer wants turkey"
+
+    def test_get_cache_filter_by_domain(self, client: TestClient) -> None:
+        """Test filtering cache by domain_id."""
+        from loopengine.behaviors import BehaviorCache
+
+        cache = BehaviorCache()
+        behavior1 = BehaviorResponse(action="action1", parameters={}, reasoning="", metadata={})
+        behavior2 = BehaviorResponse(action="action2", parameters={}, reasoning="", metadata={})
+        behavior3 = BehaviorResponse(action="action3", parameters={}, reasoning="", metadata={})
+        cache.set("domain_a:agent1:hash1", behavior1)
+        cache.set("domain_a:agent2:hash2", behavior2)
+        cache.set("domain_b:agent1:hash3", behavior3)
+
+        with patch("loopengine.api.behaviors._get_behavior_cache", return_value=cache):
+            response = client.get("/api/v1/behaviors/cache?domain_id=domain_a")
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert len(data["entries"]) == 2
+
+        # All entries should be from domain_a
+        for entry in data["entries"]:
+            assert entry["key"].startswith("domain_a:")
+
+    def test_get_cache_filter_nonexistent_domain(self, client: TestClient) -> None:
+        """Test filtering by nonexistent domain returns empty list."""
+        from loopengine.behaviors import BehaviorCache
+
+        cache = BehaviorCache()
+        behavior1 = BehaviorResponse(action="action1", parameters={}, reasoning="", metadata={})
+        cache.set("domain_a:agent1:hash1", behavior1)
+
+        with patch("loopengine.api.behaviors._get_behavior_cache", return_value=cache):
+            response = client.get("/api/v1/behaviors/cache?domain_id=nonexistent")
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["entries"] == []
+        # total_entries should show the actual cache size, not filtered count
+        assert data["total_entries"] == 1
+
+    def test_get_cache_includes_stats(self, client: TestClient) -> None:
+        """Test that cache stats are included in response."""
+        from loopengine.behaviors import BehaviorCache
+
+        cache = BehaviorCache()
+        behavior = BehaviorResponse(action="test", parameters={}, reasoning="", metadata={})
+        cache.set("domain:agent:hash", behavior)
+
+        # Generate some hits and misses
+        cache.get("domain:agent:hash")  # hit
+        cache.get("domain:agent:hash")  # hit
+        cache.get("nonexistent:key:abc")  # miss
+
+        with patch("loopengine.api.behaviors._get_behavior_cache", return_value=cache):
+            response = client.get("/api/v1/behaviors/cache")
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["stats"]["hits"] == 2
+        assert data["stats"]["misses"] == 1
+        assert data["stats"]["hit_rate"] > 0
+
+    def test_get_cache_entry_has_ttl_info(self, client: TestClient) -> None:
+        """Test that each entry includes TTL information."""
+        from loopengine.behaviors import BehaviorCache
+
+        cache = BehaviorCache(default_ttl=300)  # 5 minutes
+        behavior = BehaviorResponse(action="test", parameters={}, reasoning="", metadata={})
+        cache.set("domain:agent:hash", behavior)
+
+        with patch("loopengine.api.behaviors._get_behavior_cache", return_value=cache):
+            response = client.get("/api/v1/behaviors/cache")
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        entry = data["entries"][0]
+
+        assert "created_at" in entry
+        assert "expires_at" in entry
+        assert "ttl_remaining" in entry
+        assert entry["created_at"] > 0
+        assert entry["expires_at"] > entry["created_at"]
+        assert entry["ttl_remaining"] > 0
+        assert entry["ttl_remaining"] <= 300  # Should be less than or equal to TTL
+
+    def test_get_cache_expired_entries_excluded(self, client: TestClient) -> None:
+        """Test that expired entries are not returned."""
+        from loopengine.behaviors import BehaviorCache
+
+        cache = BehaviorCache()
+        behavior = BehaviorResponse(action="test", parameters={}, reasoning="", metadata={})
+        # Set with very short TTL
+        cache.set("domain:agent:hash", behavior, ttl=0.001)
+
+        # Wait for expiration
+        import time
+
+        time.sleep(0.01)
+
+        with patch("loopengine.api.behaviors._get_behavior_cache", return_value=cache):
+            response = client.get("/api/v1/behaviors/cache")
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["entries"] == []

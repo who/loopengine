@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 from loopengine.behaviors import (
     AIBehaviorEngine,
     AIBehaviorEngineError,
+    BehaviorCache,
     BehaviorHistoryStore,
     DomainStore,
     DomainStoreError,
@@ -106,6 +107,7 @@ class GenerateBehaviorResponse(BaseModel):
 # Engine instance cache for reuse
 _engine: AIBehaviorEngine | None = None
 _history_store: BehaviorHistoryStore | None = None
+_behavior_cache: BehaviorCache | None = None
 
 
 def _get_engine() -> AIBehaviorEngine:
@@ -149,6 +151,28 @@ def set_history_store(store: BehaviorHistoryStore) -> None:
     """
     global _history_store
     _history_store = store
+
+
+def _get_behavior_cache() -> BehaviorCache:
+    """Get or create a BehaviorCache instance.
+
+    Returns:
+        BehaviorCache instance.
+    """
+    global _behavior_cache
+    if _behavior_cache is None:
+        _behavior_cache = BehaviorCache()
+    return _behavior_cache
+
+
+def set_behavior_cache(cache: BehaviorCache) -> None:
+    """Set the behavior cache instance (for testing).
+
+    Args:
+        cache: BehaviorCache instance to use.
+    """
+    global _behavior_cache
+    _behavior_cache = cache
 
 
 def _find_agent_type_in_schema(
@@ -660,3 +684,128 @@ async def clear_behavior_history() -> dict[str, str]:
     history_store.clear()
     logger.info("Behavior history cleared via API")
     return {"message": "Behavior history cleared successfully"}
+
+
+# ============================================================================
+# Cache Inspection Endpoints
+# ============================================================================
+
+
+class CachedBehaviorEntry(BaseModel):
+    """A single cached behavior entry.
+
+    Attributes:
+        key: The cache key (format: domain_id:agent_type:context_hash).
+        action: The cached action.
+        parameters: The cached action parameters.
+        reasoning: The cached reasoning.
+        created_at: When the entry was cached (epoch seconds).
+        expires_at: When the entry expires (epoch seconds).
+        ttl_remaining: Seconds until expiration.
+    """
+
+    key: str = Field(description="Cache key")
+    action: str = Field(description="Cached action")
+    parameters: dict[str, Any] = Field(default_factory=dict, description="Action parameters")
+    reasoning: str = Field(default="", description="Cached reasoning")
+    created_at: float = Field(description="When entry was cached (epoch)")
+    expires_at: float = Field(description="When entry expires (epoch)")
+    ttl_remaining: float = Field(description="Seconds until expiration")
+
+
+class CacheStatsInfo(BaseModel):
+    """Cache statistics information.
+
+    Attributes:
+        hits: Number of cache hits.
+        misses: Number of cache misses.
+        hit_rate: Cache hit rate (0.0-1.0).
+        evictions: Number of LRU evictions.
+        expirations: Number of TTL expirations.
+    """
+
+    hits: int = Field(description="Number of cache hits")
+    misses: int = Field(description="Number of cache misses")
+    hit_rate: float = Field(description="Cache hit rate (0.0-1.0)")
+    evictions: int = Field(description="Number of LRU evictions")
+    expirations: int = Field(description="Number of TTL expirations")
+
+
+class CacheResponse(BaseModel):
+    """Response for cache listing endpoint.
+
+    Attributes:
+        entries: List of cached behavior entries.
+        total_entries: Total number of entries in the cache.
+        stats: Cache statistics.
+    """
+
+    entries: list[CachedBehaviorEntry] = Field(description="Cached behavior entries")
+    total_entries: int = Field(description="Total entries in cache")
+    stats: CacheStatsInfo = Field(description="Cache statistics")
+
+
+@router.get(
+    "/cache",
+    response_model=CacheResponse,
+    responses={
+        200: {"description": "Cache entries listed successfully"},
+    },
+)
+async def get_cache(
+    domain_id: str | None = Query(default=None, description="Filter by domain ID"),
+) -> CacheResponse:
+    """List cached behaviors for inspection and debugging.
+
+    Returns all cached behavior entries, optionally filtered by domain.
+    Also includes cache statistics (hits, misses, hit rate).
+
+    Args:
+        domain_id: Optional domain ID to filter entries.
+
+    Returns:
+        CacheResponse with list of entries and cache stats.
+    """
+    import time as time_module
+
+    cache = _get_behavior_cache()
+    now = time_module.time()
+
+    # Get entries, optionally filtered by domain
+    raw_entries = cache.list_entries(domain_id=domain_id)
+
+    # Convert to response model
+    entries = [
+        CachedBehaviorEntry(
+            key=key,
+            action=entry.behavior.action,
+            parameters=entry.behavior.parameters,
+            reasoning=entry.behavior.reasoning,
+            created_at=entry.created_at,
+            expires_at=entry.expires_at,
+            ttl_remaining=max(0.0, entry.expires_at - now),
+        )
+        for key, entry in raw_entries
+    ]
+
+    # Get cache stats
+    stats_dict = cache.get_stats()
+    stats = CacheStatsInfo(
+        hits=stats_dict["hits"],
+        misses=stats_dict["misses"],
+        hit_rate=stats_dict["hit_rate"],
+        evictions=stats_dict["evictions"],
+        expirations=stats_dict["expirations"],
+    )
+
+    logger.debug(
+        "Listed %d cache entries (domain_id=%s)",
+        len(entries),
+        domain_id or "all",
+    )
+
+    return CacheResponse(
+        entries=entries,
+        total_entries=stats_dict["size"],
+        stats=stats,
+    )
