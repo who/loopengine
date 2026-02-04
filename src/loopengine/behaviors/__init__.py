@@ -22,6 +22,12 @@ from loopengine.behaviors.domain_parser import (
     InteractionSchema,
     ResourceSchema,
 )
+from loopengine.behaviors.domain_store import (
+    DomainMetadata,
+    DomainStore,
+    DomainStoreError,
+    StoredDomain,
+)
 from loopengine.behaviors.fallback import (
     FallbackBehavior,
     FallbackReason,
@@ -53,9 +59,12 @@ __all__ = [
     "AgentTypeSchema",
     "BehaviorResponse",
     "DomainContext",
+    "DomainMetadata",
     "DomainParser",
     "DomainParserError",
     "DomainSchema",
+    "DomainStore",
+    "DomainStoreError",
     "FallbackBehavior",
     "FallbackReason",
     "InteractionSchema",
@@ -68,6 +77,7 @@ __all__ = [
     "ResourceSchema",
     "ResponseParser",
     "ResponseParserError",
+    "StoredDomain",
     "classify_error",
     "get_llm_config",
 ]
