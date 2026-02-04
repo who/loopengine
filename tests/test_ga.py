@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from loopengine.engine.fitness import alex_fitness, tom_fitness
+from loopengine.engine.fitness import alex_fitness, maria_fitness, tom_fitness
 from loopengine.engine.ga import FitnessEvaluator, GAEngine, GAStats, evaluate_fitness
 from loopengine.model.genome import GenomeSchema, GenomeTrait
 
@@ -1323,5 +1323,232 @@ class TestAlexFitness:
 
         expected = (throughput * accuracy) - wait_penalty + upsell_bonus
         # = (0.06 * 0.9) - 0.5 + 0.6 = 0.054 - 0.5 + 0.6 = 0.154
+
+        assert abs(fitness - expected) < 0.001
+
+
+class TestMariaFitness:
+    """Test Maria's fitness function per PRD section 9.6."""
+
+    @pytest.fixture
+    def sandwich_world(self):
+        """Create a sandwich shop world for testing."""
+        from loopengine.corpora.sandwich_shop import create_world
+
+        return create_world()
+
+    def test_maria_fitness_computes_shop_total_throughput(self, sandwich_world) -> None:
+        """Test that maria_fitness computes shop_total_throughput."""
+        maria = sandwich_world.agents["maria"]
+        maria.internal_state["supply_cost"] = 0.0
+        maria.internal_state["revenue"] = 100.0
+        maria.internal_state["stockout_events"] = 0
+
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state["sandwiches_completed"] = 20
+        tom.internal_state["waste_count"] = 0
+
+        sandwich_world.tick = 100
+
+        fitness = maria_fitness(sandwich_world, "maria")
+
+        # throughput = 20/100 = 0.2, margin = 1 - 0/100 = 1.0
+        # fitness = 0.2 * 1.0 - 0 - 0 = 0.2
+        assert abs(fitness - 0.2) < 0.001
+
+    def test_maria_fitness_tracks_supply_cost_and_revenue(self, sandwich_world) -> None:
+        """Test that maria_fitness tracks supply_cost and revenue for margin."""
+        maria = sandwich_world.agents["maria"]
+        maria.internal_state["supply_cost"] = 30.0
+        maria.internal_state["revenue"] = 100.0
+        maria.internal_state["stockout_events"] = 0
+
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state["sandwiches_completed"] = 10
+        tom.internal_state["waste_count"] = 0
+
+        sandwich_world.tick = 100
+
+        fitness = maria_fitness(sandwich_world, "maria")
+
+        # throughput = 10/100 = 0.1, margin = 1 - 30/100 = 0.7
+        # fitness = 0.1 * 0.7 - 0 - 0 = 0.07
+        assert abs(fitness - 0.07) < 0.001
+
+    def test_maria_fitness_counts_stockout_events(self, sandwich_world) -> None:
+        """Test that maria_fitness counts stockout_events."""
+        maria = sandwich_world.agents["maria"]
+        maria.internal_state["supply_cost"] = 0.0
+        maria.internal_state["revenue"] = 100.0
+        maria.internal_state["stockout_events"] = 3
+
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state["sandwiches_completed"] = 10
+        tom.internal_state["waste_count"] = 0
+
+        sandwich_world.tick = 100
+
+        fitness = maria_fitness(sandwich_world, "maria")
+
+        # throughput = 10/100 = 0.1, margin = 1.0
+        # stockout_penalty = 3 * 2.0 = 6.0
+        # fitness = 0.1 * 1.0 - 6.0 - 0 = -5.9
+        expected = 0.1 * 1.0 - (3 * 2.0) - 0
+        assert abs(fitness - expected) < 0.001
+
+    def test_maria_fitness_sums_waste_total(self, sandwich_world) -> None:
+        """Test that maria_fitness sums waste_total."""
+        maria = sandwich_world.agents["maria"]
+        maria.internal_state["supply_cost"] = 0.0
+        maria.internal_state["revenue"] = 100.0
+        maria.internal_state["stockout_events"] = 0
+
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state["sandwiches_completed"] = 10
+        tom.internal_state["waste_count"] = 4
+
+        sandwich_world.tick = 100
+
+        fitness = maria_fitness(sandwich_world, "maria")
+
+        # throughput = 10/100 = 0.1, margin = 1.0
+        # waste_penalty = 4 * 0.5 = 2.0
+        # fitness = 0.1 * 1.0 - 0 - 2.0 = -1.9
+        expected = 0.1 * 1.0 - 0 - (4 * 0.5)
+        assert abs(fitness - expected) < 0.001
+
+    def test_maria_fitness_returns_scalar(self, sandwich_world) -> None:
+        """Test that maria_fitness returns scalar fitness."""
+        maria = sandwich_world.agents["maria"]
+        maria.internal_state["supply_cost"] = 20.0
+        maria.internal_state["revenue"] = 80.0
+        maria.internal_state["stockout_events"] = 1
+
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state["sandwiches_completed"] = 15
+        tom.internal_state["waste_count"] = 2
+
+        sandwich_world.tick = 150
+
+        fitness = maria_fitness(sandwich_world, "maria")
+
+        assert isinstance(fitness, float)
+
+    def test_maria_fitness_stockouts_heavily_penalized(self, sandwich_world) -> None:
+        """Test that stockouts heavily penalize fitness."""
+        # Scenario without stockouts
+        maria = sandwich_world.agents["maria"]
+        maria.internal_state["supply_cost"] = 10.0
+        maria.internal_state["revenue"] = 100.0
+        maria.internal_state["stockout_events"] = 0
+
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state["sandwiches_completed"] = 20
+        tom.internal_state["waste_count"] = 0
+
+        sandwich_world.tick = 100
+
+        no_stockout_fitness = maria_fitness(sandwich_world, "maria")
+
+        # Scenario with stockouts
+        maria.internal_state["stockout_events"] = 5
+
+        with_stockout_fitness = maria_fitness(sandwich_world, "maria")
+
+        # Stockouts should heavily penalize (5 * 2.0 = 10.0 reduction)
+        assert no_stockout_fitness - with_stockout_fitness == pytest.approx(10.0)
+
+    def test_maria_fitness_high_throughput_higher_fitness(self, sandwich_world) -> None:
+        """Test that high throughput = higher fitness."""
+        maria = sandwich_world.agents["maria"]
+        maria.internal_state["supply_cost"] = 10.0
+        maria.internal_state["revenue"] = 100.0
+        maria.internal_state["stockout_events"] = 0
+
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state["waste_count"] = 0
+
+        sandwich_world.tick = 100
+
+        # Low throughput
+        tom.internal_state["sandwiches_completed"] = 5
+        low_throughput_fitness = maria_fitness(sandwich_world, "maria")
+
+        # High throughput
+        tom.internal_state["sandwiches_completed"] = 30
+        high_throughput_fitness = maria_fitness(sandwich_world, "maria")
+
+        assert high_throughput_fitness > low_throughput_fitness
+
+    def test_maria_fitness_handles_zero_ticks(self, sandwich_world) -> None:
+        """Test that maria_fitness handles zero ticks gracefully."""
+        sandwich_world.tick = 0
+
+        fitness = maria_fitness(sandwich_world, "maria")
+
+        assert fitness == 0.0
+
+    def test_maria_fitness_handles_zero_revenue(self, sandwich_world) -> None:
+        """Test that maria_fitness handles zero revenue (margin = 0)."""
+        maria = sandwich_world.agents["maria"]
+        maria.internal_state["supply_cost"] = 50.0
+        maria.internal_state["revenue"] = 0.0  # No revenue
+        maria.internal_state["stockout_events"] = 0
+
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state["sandwiches_completed"] = 10
+        tom.internal_state["waste_count"] = 0
+
+        sandwich_world.tick = 100
+
+        fitness = maria_fitness(sandwich_world, "maria")
+
+        # margin = 0 when revenue = 0, so throughput * margin = 0
+        # fitness = 0 - 0 - 0 = 0
+        assert fitness == 0.0
+
+    def test_maria_fitness_handles_empty_internal_state(self, sandwich_world) -> None:
+        """Test that maria_fitness handles empty internal state."""
+        maria = sandwich_world.agents["maria"]
+        maria.internal_state.clear()
+
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state.clear()
+
+        sandwich_world.tick = 100
+
+        fitness = maria_fitness(sandwich_world, "maria")
+
+        # All metrics default to 0
+        assert fitness == 0.0
+
+    def test_maria_fitness_raises_for_missing_agent(self, sandwich_world) -> None:
+        """Test that maria_fitness raises error for missing agent."""
+        with pytest.raises(ValueError, match="not found"):
+            maria_fitness(sandwich_world, "nonexistent_agent")
+
+    def test_maria_fitness_formula_components(self, sandwich_world) -> None:
+        """Test that fitness formula combines all components correctly."""
+        maria = sandwich_world.agents["maria"]
+        maria.internal_state["supply_cost"] = 40.0
+        maria.internal_state["revenue"] = 200.0
+        maria.internal_state["stockout_events"] = 2
+
+        tom = sandwich_world.agents["tom"]
+        tom.internal_state["sandwiches_completed"] = 25
+        tom.internal_state["waste_count"] = 6
+
+        sandwich_world.tick = 500
+
+        fitness = maria_fitness(sandwich_world, "maria")
+
+        # Manual calculation:
+        throughput = 25 / 500  # = 0.05
+        margin = 1 - (40 / 200)  # = 0.8
+        stockout_penalty = 2 * 2.0  # = 4.0
+        waste_penalty = 6 * 0.5  # = 3.0
+
+        expected = (throughput * margin) - stockout_penalty - waste_penalty
+        # = (0.05 * 0.8) - 4.0 - 3.0 = 0.04 - 4.0 - 3.0 = -6.96
 
         assert abs(fitness - expected) < 0.001

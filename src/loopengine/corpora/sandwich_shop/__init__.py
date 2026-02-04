@@ -256,11 +256,26 @@ def maria_policy(
     """
     outputs: list[Particle] = []
 
+    # Initialize fitness tracking metrics if needed
+    if "supply_cost" not in internal_state:
+        internal_state["supply_cost"] = 0.0
+    if "revenue" not in internal_state:
+        internal_state["revenue"] = 0.0
+    if "stockout_events" not in internal_state:
+        internal_state["stockout_events"] = 0
+
     # Process incoming reports
     for particle in sensed_inputs:
         if particle.particle_type == "stockout_alert":
+            # Track stockout events for fitness
+            internal_state["stockout_events"] += 1
+
             # Generate supply order if cost-sensitive threshold allows
             if genome.get("cost_sensitivity", 0.5) < 0.95:  # Very cost-sensitive might delay
+                # Track supply cost (assume standard supply cost per order)
+                supply_cost_per_order = 10.0
+                internal_state["supply_cost"] += supply_cost_per_order
+
                 outputs.append(
                     Particle(
                         id=f"supply_order_{particle.id}",
@@ -271,6 +286,14 @@ def maria_policy(
                         link_id="",
                     )
                 )
+
+        elif particle.particle_type == "revenue_report":
+            # Track revenue from served customers
+            # Assume $10 revenue per customer served
+            revenue_per_customer = 10.0
+            total_served = particle.payload.get("total_served", 0)
+            # Revenue reports are cumulative, so we set rather than add
+            internal_state["revenue"] = total_served * revenue_per_customer
 
     # Check queue depth from internal state and issue directives
     queue_depth = internal_state.get("observed_queue_depth", 0)

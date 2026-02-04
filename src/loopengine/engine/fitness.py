@@ -143,3 +143,66 @@ def alex_fitness(world: World, agent_id: str) -> float:
     fitness = (throughput * order_accuracy_rate) - (avg_wait_time * 0.05) + (upsell_count * 0.1)
 
     return fitness
+
+
+def maria_fitness(world: World, agent_id: str) -> float:
+    """Compute fitness for Maria (owner role) per PRD section 9.6.
+
+    Fitness formula:
+        fitness = shop_total_throughput                  # productivity
+                * (1 - supply_cost / revenue)            # margin
+                - stockout_events * 2.0                  # severe penalty
+                - waste_total * 0.5                      # waste penalty
+
+    The function reads metrics from Maria's internal_state and other agents
+    that are tracked during simulation.
+
+    Args:
+        world: World state after simulation.
+        agent_id: ID of the agent to evaluate (should be Maria).
+
+    Returns:
+        float: Scalar fitness value (higher is better).
+
+    Raises:
+        ValueError: If agent not found in world.
+    """
+    if agent_id not in world.agents:
+        msg = f"Agent '{agent_id}' not found in world"
+        raise ValueError(msg)
+
+    agent = world.agents[agent_id]
+    internal_state = agent.internal_state
+    ticks_elapsed = world.tick
+
+    # Avoid division by zero
+    if ticks_elapsed == 0:
+        return 0.0
+
+    # Get shop throughput from Tom's sandwiches_completed
+    tom = world.agents.get("tom")
+    sandwiches_completed = 0
+    waste_total = 0
+    if tom:
+        sandwiches_completed = tom.internal_state.get("sandwiches_completed", 0)
+        waste_total = tom.internal_state.get("waste_count", 0)
+
+    # Compute shop_total_throughput: sandwiches per tick
+    shop_total_throughput = sandwiches_completed / ticks_elapsed
+
+    # Get financial metrics from Maria's internal_state
+    supply_cost = internal_state.get("supply_cost", 0.0)
+    revenue = internal_state.get("revenue", 0.0)
+    stockout_events = internal_state.get("stockout_events", 0)
+
+    # Compute margin: (1 - supply_cost / revenue)
+    # If revenue is 0, margin is 0 (can't have margin without revenue)
+    if revenue > 0:
+        margin = 1 - (supply_cost / revenue)
+    else:
+        margin = 0.0
+
+    # Compute fitness per PRD formula
+    fitness = shop_total_throughput * margin - (stockout_events * 2.0) - (waste_total * 0.5)
+
+    return fitness
