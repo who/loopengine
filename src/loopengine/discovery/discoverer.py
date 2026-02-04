@@ -2,12 +2,16 @@
 
 This module implements the discover_schemas function that sends system descriptions
 to the Claude API and parses GenomeSchema objects from the response.
+
+Also includes genome migration utilities for gracefully updating agent genomes
+when schemas change (per PRD section 5.2).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import random
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -59,6 +63,127 @@ class DiscoveryResult:
     roles: dict[str, DiscoveredRole] = field(default_factory=dict)
     discovery_prompt: str = ""
     discovered_at: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class MigrationResult:
+    """Result of a genome migration operation.
+
+    Tracks what changed during migration for debugging and auditing.
+
+    Attributes:
+        migrated_genome: The new genome dict after migration.
+        added_traits: List of trait names that were added (new in schema).
+        vestigial_traits: List of trait names that are now vestigial (not in new schema).
+        preserved_traits: List of trait names that were preserved unchanged.
+        schema_version: The version of the new schema.
+    """
+
+    migrated_genome: dict[str, float] = field(default_factory=dict)
+    added_traits: list[str] = field(default_factory=list)
+    vestigial_traits: list[str] = field(default_factory=list)
+    preserved_traits: list[str] = field(default_factory=list)
+    schema_version: int = 1
+
+
+def migrate_genome(
+    old_genome: dict[str, float],
+    new_schema: GenomeSchema,
+    vestigial_marker: str = "_vestigial",
+) -> MigrationResult:
+    """Migrate an agent genome to a new schema.
+
+    Handles genome updates when schemas change per PRD section 5.2:
+    - New traits: added with random initialization within the trait's range
+    - Deprecated traits: preserved but flagged as vestigial
+    - Existing traits: values preserved if trait name matches in new schema
+
+    This function is non-destructive and does not modify the input genome.
+
+    Args:
+        old_genome: The agent's current genome dict (trait_name -> value).
+        new_schema: The new GenomeSchema to migrate to.
+        vestigial_marker: Suffix to append to deprecated trait names.
+
+    Returns:
+        MigrationResult with the migrated genome and change tracking.
+
+    Example:
+        >>> old_genome = {"speed": 0.8, "old_trait": 0.5}
+        >>> new_schema = GenomeSchema(
+        ...     role="worker",
+        ...     traits={"speed": GenomeTrait(name="speed", description="..."),
+        ...             "new_trait": GenomeTrait(name="new_trait", description="...")}
+        ... )
+        >>> result = migrate_genome(old_genome, new_schema)
+        >>> "speed" in result.migrated_genome  # preserved
+        True
+        >>> "new_trait" in result.migrated_genome  # added
+        True
+        >>> "old_trait_vestigial" in result.migrated_genome  # marked vestigial
+        True
+    """
+    result = MigrationResult(schema_version=new_schema.version)
+    new_genome: dict[str, float] = {}
+
+    # Get trait names from new schema
+    new_trait_names = set(new_schema.traits.keys())
+    old_trait_names = set(old_genome.keys())
+
+    # Filter out already-vestigial traits from old_trait_names for comparison
+    # (vestigial traits have the marker suffix)
+    active_old_traits = {name for name in old_trait_names if not name.endswith(vestigial_marker)}
+    vestigial_old_traits = {name for name in old_trait_names if name.endswith(vestigial_marker)}
+
+    # 1. Preserve existing traits that are still in the schema
+    for trait_name in active_old_traits & new_trait_names:
+        new_genome[trait_name] = old_genome[trait_name]
+        result.preserved_traits.append(trait_name)
+        logger.debug("Preserved trait '%s' with value %.3f", trait_name, old_genome[trait_name])
+
+    # 2. Add new traits with random initialization
+    for trait_name in new_trait_names - active_old_traits:
+        trait = new_schema.traits[trait_name]
+        # Random value within the trait's range
+        value = random.uniform(trait.min_val, trait.max_val)
+        new_genome[trait_name] = value
+        result.added_traits.append(trait_name)
+        logger.debug(
+            "Added new trait '%s' with random value %.3f (range: %.1f-%.1f)",
+            trait_name,
+            value,
+            trait.min_val,
+            trait.max_val,
+        )
+
+    # 3. Mark deprecated traits as vestigial
+    for trait_name in active_old_traits - new_trait_names:
+        vestigial_name = f"{trait_name}{vestigial_marker}"
+        new_genome[vestigial_name] = old_genome[trait_name]
+        result.vestigial_traits.append(trait_name)
+        logger.debug(
+            "Marked trait '%s' as vestigial (now '%s') with value %.3f",
+            trait_name,
+            vestigial_name,
+            old_genome[trait_name],
+        )
+
+    # 4. Carry forward existing vestigial traits unchanged
+    for trait_name in vestigial_old_traits:
+        new_genome[trait_name] = old_genome[trait_name]
+        logger.debug("Carried forward vestigial trait '%s'", trait_name)
+
+    result.migrated_genome = new_genome
+
+    # Log summary
+    logger.info(
+        "Genome migration complete: %d preserved, %d added, %d vestigial",
+        len(result.preserved_traits),
+        len(result.added_traits),
+        len(result.vestigial_traits),
+    )
+
+    return result
 
 
 # Valid trait categories

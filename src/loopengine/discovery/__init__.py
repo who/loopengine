@@ -6,7 +6,9 @@ from loopengine.discovery.discoverer import (
     Discoverer,
     DiscoveryError,
     DiscoveryResult,
+    MigrationResult,
     discover_schemas,
+    migrate_genome,
 )
 
 __all__ = [
@@ -15,5 +17,7 @@ __all__ = [
     "Discoverer",
     "DiscoveryError",
     "DiscoveryResult",
+    "MigrationResult",
     "discover_schemas",
+    "migrate_genome",
 ]

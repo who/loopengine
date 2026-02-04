@@ -1186,3 +1186,414 @@ class TestRoleAppropriateTraits:
                 result.roles["sandwich_maker"].flexibility_score
                 <= result.roles["owner"].flexibility_score
             )
+
+
+class TestMigrationResult:
+    """Tests for MigrationResult dataclass."""
+
+    def test_migration_result_defaults(self) -> None:
+        """Test MigrationResult has correct defaults."""
+        from loopengine.discovery.discoverer import MigrationResult
+
+        result = MigrationResult()
+
+        assert result.migrated_genome == {}
+        assert result.added_traits == []
+        assert result.vestigial_traits == []
+        assert result.preserved_traits == []
+        assert result.schema_version == 1
+
+    def test_migration_result_with_data(self) -> None:
+        """Test MigrationResult accepts data."""
+        from loopengine.discovery.discoverer import MigrationResult
+
+        result = MigrationResult(
+            migrated_genome={"speed": 0.5},
+            added_traits=["new_trait"],
+            vestigial_traits=["old_trait"],
+            preserved_traits=["speed"],
+            schema_version=2,
+        )
+
+        assert result.migrated_genome == {"speed": 0.5}
+        assert result.added_traits == ["new_trait"]
+        assert result.vestigial_traits == ["old_trait"]
+        assert result.preserved_traits == ["speed"]
+        assert result.schema_version == 2
+
+
+class TestMigrateGenome:
+    """Tests for migrate_genome function."""
+
+    @pytest.fixture
+    def old_schema(self) -> GenomeSchema:
+        """Create an old schema for testing."""
+        return GenomeSchema(
+            role="worker",
+            traits={
+                "speed": GenomeTrait(
+                    name="speed", description="Movement speed", min_val=0.0, max_val=1.0
+                ),
+                "strength": GenomeTrait(
+                    name="strength", description="Physical strength", min_val=0.0, max_val=1.0
+                ),
+                "old_trait": GenomeTrait(
+                    name="old_trait", description="Will be deprecated", min_val=0.0, max_val=1.0
+                ),
+            },
+            version=1,
+        )
+
+    @pytest.fixture
+    def new_schema(self) -> GenomeSchema:
+        """Create a new schema for testing migration."""
+        return GenomeSchema(
+            role="worker",
+            traits={
+                "speed": GenomeTrait(
+                    name="speed", description="Movement speed", min_val=0.0, max_val=1.0
+                ),
+                "strength": GenomeTrait(
+                    name="strength", description="Physical strength", min_val=0.0, max_val=1.0
+                ),
+                "new_trait": GenomeTrait(
+                    name="new_trait", description="Newly discovered", min_val=0.2, max_val=0.8
+                ),
+            },
+            version=2,
+        )
+
+    @pytest.fixture
+    def old_genome(self) -> dict[str, float]:
+        """Create an old genome for testing."""
+        return {"speed": 0.7, "strength": 0.5, "old_trait": 0.3}
+
+    def test_migrate_preserves_existing_traits(
+        self, old_genome: dict[str, float], new_schema: GenomeSchema
+    ) -> None:
+        """Test that existing traits matching the new schema are preserved."""
+        from loopengine.discovery.discoverer import migrate_genome
+
+        result = migrate_genome(old_genome, new_schema)
+
+        # speed and strength should be preserved with exact values
+        assert result.migrated_genome["speed"] == 0.7
+        assert result.migrated_genome["strength"] == 0.5
+        assert "speed" in result.preserved_traits
+        assert "strength" in result.preserved_traits
+
+    def test_migrate_adds_new_traits_with_random_values(
+        self, old_genome: dict[str, float], new_schema: GenomeSchema
+    ) -> None:
+        """Test that new traits are added with random values in range."""
+        from loopengine.discovery.discoverer import migrate_genome
+
+        result = migrate_genome(old_genome, new_schema)
+
+        # new_trait should be added
+        assert "new_trait" in result.migrated_genome
+        assert "new_trait" in result.added_traits
+
+        # Value should be within the trait's range (0.2-0.8)
+        new_value = result.migrated_genome["new_trait"]
+        assert 0.2 <= new_value <= 0.8
+
+    def test_migrate_marks_deprecated_traits_vestigial(
+        self, old_genome: dict[str, float], new_schema: GenomeSchema
+    ) -> None:
+        """Test that deprecated traits are marked as vestigial."""
+        from loopengine.discovery.discoverer import migrate_genome
+
+        result = migrate_genome(old_genome, new_schema)
+
+        # old_trait should be renamed with vestigial marker
+        assert "old_trait" not in result.migrated_genome
+        assert "old_trait_vestigial" in result.migrated_genome
+        assert result.migrated_genome["old_trait_vestigial"] == 0.3
+        assert "old_trait" in result.vestigial_traits
+
+    def test_migrate_is_non_destructive(
+        self, old_genome: dict[str, float], new_schema: GenomeSchema
+    ) -> None:
+        """Test that migration does not modify the input genome."""
+        from loopengine.discovery.discoverer import migrate_genome
+
+        original_genome = old_genome.copy()
+        migrate_genome(old_genome, new_schema)
+
+        # Original genome should be unchanged
+        assert old_genome == original_genome
+
+    def test_migrate_returns_schema_version(
+        self, old_genome: dict[str, float], new_schema: GenomeSchema
+    ) -> None:
+        """Test that migration result includes schema version."""
+        from loopengine.discovery.discoverer import migrate_genome
+
+        result = migrate_genome(old_genome, new_schema)
+
+        assert result.schema_version == new_schema.version
+
+    def test_migrate_custom_vestigial_marker(
+        self, old_genome: dict[str, float], new_schema: GenomeSchema
+    ) -> None:
+        """Test that custom vestigial marker can be used."""
+        from loopengine.discovery.discoverer import migrate_genome
+
+        result = migrate_genome(old_genome, new_schema, vestigial_marker="_deprecated")
+
+        assert "old_trait_deprecated" in result.migrated_genome
+        assert "old_trait_vestigial" not in result.migrated_genome
+
+    def test_migrate_empty_genome_to_new_schema(self, new_schema: GenomeSchema) -> None:
+        """Test migrating an empty genome adds all traits."""
+        from loopengine.discovery.discoverer import migrate_genome
+
+        result = migrate_genome({}, new_schema)
+
+        assert len(result.migrated_genome) == 3
+        assert "speed" in result.migrated_genome
+        assert "strength" in result.migrated_genome
+        assert "new_trait" in result.migrated_genome
+        assert len(result.added_traits) == 3
+        assert len(result.preserved_traits) == 0
+        assert len(result.vestigial_traits) == 0
+
+    def test_migrate_to_empty_schema(self, old_genome: dict[str, float]) -> None:
+        """Test migrating to an empty schema marks all traits vestigial."""
+        from loopengine.discovery.discoverer import migrate_genome
+
+        empty_schema = GenomeSchema(role="worker", traits={}, version=3)
+        result = migrate_genome(old_genome, empty_schema)
+
+        # All traits should be vestigial
+        assert len(result.vestigial_traits) == 3
+        assert "speed" in result.vestigial_traits
+        assert "strength" in result.vestigial_traits
+        assert "old_trait" in result.vestigial_traits
+
+        # Vestigial traits should have values preserved
+        assert result.migrated_genome["speed_vestigial"] == 0.7
+        assert result.migrated_genome["strength_vestigial"] == 0.5
+        assert result.migrated_genome["old_trait_vestigial"] == 0.3
+
+    def test_migrate_preserves_existing_vestigial_traits(self) -> None:
+        """Test that already-vestigial traits are carried forward."""
+        from loopengine.discovery.discoverer import migrate_genome
+
+        # Genome with a vestigial trait from a previous migration
+        genome_with_vestigial = {
+            "speed": 0.7,
+            "ancient_trait_vestigial": 0.2,  # Already vestigial
+        }
+
+        schema = GenomeSchema(
+            role="worker",
+            traits={
+                "speed": GenomeTrait(name="speed", description="Speed"),
+                "new_skill": GenomeTrait(name="new_skill", description="New"),
+            },
+            version=4,
+        )
+
+        result = migrate_genome(genome_with_vestigial, schema)
+
+        # Ancient vestigial trait should still be present
+        assert "ancient_trait_vestigial" in result.migrated_genome
+        assert result.migrated_genome["ancient_trait_vestigial"] == 0.2
+
+        # speed should be preserved
+        assert result.migrated_genome["speed"] == 0.7
+
+        # new_skill should be added
+        assert "new_skill" in result.migrated_genome
+
+    def test_migrate_logs_changes(
+        self, old_genome: dict[str, float], new_schema: GenomeSchema
+    ) -> None:
+        """Test that migration logs changes for debugging."""
+        from loopengine.discovery.discoverer import migrate_genome
+
+        with patch("loopengine.discovery.discoverer.logger") as mock_logger:
+            migrate_genome(old_genome, new_schema)
+
+            # Should log preserved traits
+            mock_logger.debug.assert_any_call("Preserved trait '%s' with value %.3f", "speed", 0.7)
+            mock_logger.debug.assert_any_call(
+                "Preserved trait '%s' with value %.3f", "strength", 0.5
+            )
+
+            # Should log vestigial traits
+            mock_logger.debug.assert_any_call(
+                "Marked trait '%s' as vestigial (now '%s') with value %.3f",
+                "old_trait",
+                "old_trait_vestigial",
+                0.3,
+            )
+
+            # Should log summary
+            mock_logger.info.assert_called_with(
+                "Genome migration complete: %d preserved, %d added, %d vestigial",
+                2,  # preserved: speed, strength
+                1,  # added: new_trait
+                1,  # vestigial: old_trait
+            )
+
+    def test_migrate_new_trait_values_within_range(self) -> None:
+        """Test that new trait values are always within the specified range."""
+        from loopengine.discovery.discoverer import migrate_genome
+
+        schema = GenomeSchema(
+            role="test",
+            traits={
+                "trait_narrow": GenomeTrait(
+                    name="trait_narrow", description="Narrow range", min_val=0.4, max_val=0.6
+                ),
+                "trait_wide": GenomeTrait(
+                    name="trait_wide", description="Wide range", min_val=0.0, max_val=1.0
+                ),
+            },
+            version=1,
+        )
+
+        # Run multiple times to test randomness
+        for _ in range(20):
+            result = migrate_genome({}, schema)
+
+            narrow_val = result.migrated_genome["trait_narrow"]
+            wide_val = result.migrated_genome["trait_wide"]
+
+            assert 0.4 <= narrow_val <= 0.6, f"trait_narrow value {narrow_val} out of range"
+            assert 0.0 <= wide_val <= 1.0, f"trait_wide value {wide_val} out of range"
+
+    def test_migrate_same_schema_no_changes(self) -> None:
+        """Test migrating to the same schema preserves all traits."""
+        from loopengine.discovery.discoverer import migrate_genome
+
+        genome = {"speed": 0.7, "strength": 0.5}
+        schema = GenomeSchema(
+            role="worker",
+            traits={
+                "speed": GenomeTrait(name="speed", description="Speed"),
+                "strength": GenomeTrait(name="strength", description="Strength"),
+            },
+            version=1,
+        )
+
+        result = migrate_genome(genome, schema)
+
+        assert result.migrated_genome == genome
+        assert len(result.preserved_traits) == 2
+        assert len(result.added_traits) == 0
+        assert len(result.vestigial_traits) == 0
+
+
+class TestMigrationWithAgents:
+    """Tests for genome migration with agents (integration scenarios)."""
+
+    def test_migrate_agent_genome_preserves_functionality(self) -> None:
+        """Test that migrated genome works with agent policy expectations."""
+        from loopengine.discovery.discoverer import migrate_genome
+        from loopengine.model.agent import Agent
+
+        # Create an agent with an old genome
+        agent = Agent(
+            id="agent-1",
+            name="Test Worker",
+            role="worker",
+            genome={"speed": 0.8, "old_skill": 0.6},
+        )
+
+        # New schema without old_skill but with new_skill
+        new_schema = GenomeSchema(
+            role="worker",
+            traits={
+                "speed": GenomeTrait(name="speed", description="Speed"),
+                "new_skill": GenomeTrait(name="new_skill", description="New skill"),
+            },
+            version=2,
+        )
+
+        # Migrate the genome
+        result = migrate_genome(agent.genome, new_schema)
+
+        # Update agent genome
+        agent.genome = result.migrated_genome
+
+        # Agent should still have speed
+        assert "speed" in agent.genome
+        assert agent.genome["speed"] == 0.8
+
+        # Agent should have new_skill
+        assert "new_skill" in agent.genome
+
+        # Old skill should be vestigial
+        assert "old_skill_vestigial" in agent.genome
+        assert agent.genome["old_skill_vestigial"] == 0.6
+
+    def test_migrate_multiple_agents_same_schema(self) -> None:
+        """Test migrating multiple agents to the same schema."""
+        from loopengine.discovery.discoverer import migrate_genome
+        from loopengine.model.agent import Agent
+
+        agents = [
+            Agent(
+                id="agent-1",
+                name="Worker 1",
+                role="worker",
+                genome={"speed": 0.9, "strength": 0.3, "old_trait": 0.5},
+            ),
+            Agent(
+                id="agent-2",
+                name="Worker 2",
+                role="worker",
+                genome={"speed": 0.4, "strength": 0.8, "old_trait": 0.2},
+            ),
+        ]
+
+        new_schema = GenomeSchema(
+            role="worker",
+            traits={
+                "speed": GenomeTrait(name="speed", description="Speed"),
+                "strength": GenomeTrait(name="strength", description="Strength"),
+                "new_trait": GenomeTrait(name="new_trait", description="New"),
+            },
+            version=2,
+        )
+
+        # Migrate all agents
+        for agent in agents:
+            result = migrate_genome(agent.genome, new_schema)
+            agent.genome = result.migrated_genome
+
+        # Both agents should have same trait keys
+        assert set(agents[0].genome.keys()) == set(agents[1].genome.keys())
+
+        # Original values should be preserved
+        assert agents[0].genome["speed"] == 0.9
+        assert agents[1].genome["speed"] == 0.4
+
+        # Vestigial traits preserved
+        assert agents[0].genome["old_trait_vestigial"] == 0.5
+        assert agents[1].genome["old_trait_vestigial"] == 0.2
+
+        # New traits added (values will differ due to randomness)
+        assert "new_trait" in agents[0].genome
+        assert "new_trait" in agents[1].genome
+
+
+class TestMigrationModuleExports:
+    """Tests for migration module exports."""
+
+    def test_import_migrate_genome_from_package(self) -> None:
+        """Test migrate_genome can be imported from discovery package."""
+        from loopengine.discovery import migrate_genome
+
+        assert callable(migrate_genome)
+
+    def test_import_migration_result_from_package(self) -> None:
+        """Test MigrationResult can be imported from discovery package."""
+        from loopengine.discovery import MigrationResult
+
+        result = MigrationResult()
+        assert result.migrated_genome == {}
