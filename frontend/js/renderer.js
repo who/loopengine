@@ -473,6 +473,11 @@
         if (typeof LoopEngineGA !== 'undefined') {
             LoopEngineGA.renderGAPanel(ctx, canvasWidth, canvasHeight);
         }
+
+        // Render Discovery panel (top-left corner, below status)
+        if (typeof LoopEngineDiscovery !== 'undefined') {
+            LoopEngineDiscovery.renderDiscoveryPanel(ctx, canvasWidth, canvasHeight);
+        }
     }
 
     // =========================================================================

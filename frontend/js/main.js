@@ -62,6 +62,11 @@
             LoopEngineGA.init(canvas, sendControlCommand);
         }
 
+        // Initialize Discovery module
+        if (typeof LoopEngineDiscovery !== 'undefined') {
+            LoopEngineDiscovery.init(canvas);
+        }
+
         // Connect to WebSockets
         connectFramesSocket();
         connectControlSocket();
