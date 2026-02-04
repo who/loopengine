@@ -261,6 +261,11 @@
             viewport.offsetY = height / 2 - centerY * viewport.scale;
         }
 
+        // Draw label regions using the labels module (lowest layer - soft translucent clouds)
+        if (typeof LoopEngineLabels !== 'undefined' && frame.label_regions) {
+            LoopEngineLabels.renderLabelRegions(ctx, frame.label_regions, animationTime, viewport);
+        }
+
         // Draw links using the links module (underneath agents and particles)
         if (typeof LoopEngineLinks !== 'undefined') {
             LoopEngineLinks.renderLinks(ctx, frame.links, animationTime, viewport);
